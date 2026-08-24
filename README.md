@@ -1,1 +1,0 @@
-# yatirim-terminali
