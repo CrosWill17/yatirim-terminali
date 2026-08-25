@@ -10,7 +10,8 @@ export interface Position {
   quantity: number;
   unit_cost: number;
   current_price?: number;
-  daily_change_pct?: number;
+  /** Günlük değişim (%). null = bu tarih için bilinmiyor. */
+  daily_change_pct?: number | null;
   target_price?: number;
   stop_price?: number;
   risk_score: number;
