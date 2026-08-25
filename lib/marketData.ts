@@ -147,21 +147,36 @@ async function fetchBorsaningundemiTickers(): Promise<{ xu100: MarketQuote | nul
     if (!res.ok) return { xu100: null, gramGold: null };
     const html = await res.text();
 
-    // Ticker markup'ına ANAHLI regex: >KOD</strong> <strong>fiyat</strong>
-    // <strong>puan fark</strong> <strong>%değişim</strong>
-    // (sayfadaki JSON veri bloklarını — ör. {"XGLD":7210.616} — yakalamaz)
+    // KOD'un HTML'deki TÜM geçiş noktalarını dener; ilk geçerli fiyat okuyanı kazanır.
+    // (Sayfada aynı kod hem görünen ticker widget'ında hem de sonda JSON veri
+    // bloğunda geçer — görünen widget'ta sayıdan hemen sonra % işareti vardır,
+    // JSON bloğunda yoktur → ayırt edici özellik.)
+    const parseWindow = (window_: string): { price: number; pct: number } | null => {
+      const nums = window_.match(/-?[\d.]{1,9}(?:,\d{1,4})?/g) ?? [];
+      if (!nums[0]) return null;
+      const price = parseFloat(nums[0].replace(/\./g, '').replace(',', '.'));
+      if (!Number.isFinite(price)) return null;
+      // % değişim: sayıdan hemen sonra (isteğe bağlı kapanış etiketi + boşluk) %
+      const pctM = window_.match(/(-?[\d.,]+)(?:<\/[a-zA-Z][^>]*>)?\s*%/);
+      if (!pctM || !pctM[1]) return null;
+      const pct = parseFloat(pctM[1].replace(',', '.'));
+      if (!Number.isFinite(pct) || Math.abs(pct) > 30) return null;
+      return { price, pct };
+    };
+
     const pick = (code: string, sanity: (n: number) => boolean): MarketQuote | null => {
-      const idx = html.lastIndexOf(`>${code}</strong>`);
-      if (idx < 0) return null;
-      const window_ = html.slice(idx, idx + 400);
-      const m = window_.match(
-        /<strong[^>]*>([\d.]+(?:,\d+)?)<\/strong>[\s\S]{0,80}?<strong[^>]*>([+-]?[\d.,]+)<\/strong>[\s\S]{0,80}?<strong[^>]*>([+-]?[\d.,]+)%<\/strong>/
-      );
-      if (!m || !m[1] || !m[3]) return null;
-      const price = parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
-      const pct = parseFloat(m[3].replace(',', '.'));
-      if (!Number.isFinite(price) || !sanity(price) || !Number.isFinite(pct)) return null;
-      return { price, changePct: pct, asOf: new Date().toLocaleDateString('tr-TR') };
+      const anchorRe = new RegExp(`>\\s*${code}\\s*</`, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = anchorRe.exec(html)) !== null) {
+        // PENCERE ANAHRIN SONUNDA BAŞLAR — yoksa kod içindeki rakamlar
+        // (ör. XU100 → "100") ilk fiyat sanılır
+        const end = m.index + m[0].length;
+        const q = parseWindow(html.slice(end, end + 600));
+        if (q && sanity(q.price)) {
+          return { price: q.price, changePct: q.pct, asOf: new Date().toLocaleDateString('tr-TR') };
+        }
+      }
+      return null;
     };
 
     return {
