@@ -113,6 +113,15 @@ DROP POLICY IF EXISTS "Public Access Transactions" ON transactions;
 DROP POLICY IF EXISTS "Public Access Decisions"    ON execution_decisions;
 DROP POLICY IF EXISTS "Public Access Predictions"  ON social_predictions;
 
+-- Önceki Auth policy'lerini temizle (tekrar çalıştırılabilirlik için)
+DROP POLICY IF EXISTS "Auth Portfolio"    ON portfolio_positions;
+DROP POLICY IF EXISTS "Auth Cash"         ON cash_ledger;
+DROP POLICY IF EXISTS "Auth Transactions" ON transactions;
+DROP POLICY IF EXISTS "Auth Decisions"    ON execution_decisions;
+DROP POLICY IF EXISTS "Auth Predictions"  ON social_predictions;
+DROP POLICY IF EXISTS "Auth Settings"     ON app_settings;
+DROP POLICY IF EXISTS "Auth Snapshots"    ON portfolio_snapshots;
+
 -- Authenticated kullanıcı policy'leri
 CREATE POLICY "Auth Portfolio"    ON portfolio_positions  FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "Auth Cash"         ON cash_ledger          FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
