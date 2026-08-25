@@ -1,14 +1,20 @@
 /**
- * YATIRIM TERMİNALİ v3.0 — PİYASA VERİ MOTORU
+ * YATIRIM TERMİNALİ v3.1 — PİYASA VERİ MOTORU
  *
- * Çift katmanlı veri mimarisi:
- *   1) LIVE  → Sunucu tarafında Yahoo Finance (BIST/Döviz/Emtia/Hisse) ve
- *              fonaly.com (TEFAS fon birim pay fiyatları) canlı çekilir.
- *   2) SEED  → Canlı kaynaklara ulaşılamazsa (ör. ağ kısıtlı ortamlar),
- *              gerçek 25.08.2026 piyasa kapanış/açılış verisiyle doldurulmuş
- *              snapshot kullanılır. Yanıt her zaman `source` alanıyla hangi
- *              katmandan geldiğini bildirir — arayüz buna göre "CANLI" veya
- *              "SON VERİ" rozetini gösterir.
+ * Katmanlı veri mimarisi (her enstrüman için en sağlam kaynağa düşer):
+ *
+ *   BIST 100 endeksi  → borsaningundemi.com piyasa ekranı (Yahoo'nun ^XU100
+ *                       beslemesi 2019'dan beri donmuş olduğu için kullanılmaz)
+ *   Gram altın        → borsaningundemi.com (BIST XGLD — perakende resmi fiyat)
+ *                       → yoksa ons + USD/TRY ile türetilir
+ *   USD/TRY, ons altın/gümüş, BIST hisseleri → Yahoo Finance chart API (range=1d,
+ *                       tazelik kontrolü: regularMarketTime > 42 saat önceyse reddedilir)
+ *   TEFAS fon NAV     → fonaly.com (birim pay fiyatı + günlük getiri)
+ *   Seed              → hiçbir kaynağa ulaşılamayan ortamlar için gerçek
+ *                       25.08.2026 KAPANIŞ snapshot'ı (resmi kapanış verileri)
+ *
+ * Yanıt her zaman `source: 'live' | 'seed'` bildirir; arayüz buna göre
+ * "CANLI" veya "SON VERİ" rozetini gösterir.
  */
 
 import { calculateGramGold, calculateGoldSilverRatio } from './calculations';
@@ -17,7 +23,7 @@ export interface MarketQuote {
   price: number;
   /** Günlük değişim (%). Bilinmiyorsa null. */
   changePct: number | null;
-  /** Verinin ait olduğu iş günü / saat (ör. "25.08.2026 16:38"). */
+  /** Verinin ait olduğu iş günü / saat (ör. "25.08.2026"). */
   asOf?: string;
 }
 
@@ -45,23 +51,23 @@ export interface MarketData {
 }
 
 /* ------------------------------------------------------------------ */
-/* 2) SEED — Gerçek 25.08.2026 piyasa snapshot'ı                       */
-/* Kaynaklar: borsaningundemi.com piyasa ekranı (25.08.2026 16:38),     */
-/* halktv.com.tr (25.08.2026 11:15), fonaly.com/TEFAS (24-25.08.2026).  */
+/* SEED — Gerçek 25.08.2026 KAPANIŞ snapshot'ı                         */
+/* Kaynaklar: borsaningundemi.com piyasa ekranı (kapanış), Yahoo       */
+/* Finance (hisse kapanışları), fonaly.com/TEFAS (fon NAV).            */
 /* ------------------------------------------------------------------ */
 
-const SEED_RATIO = calculateGoldSilverRatio(4615.8, 67.84);
+const SEED_RATIO = calculateGoldSilverRatio(4720.5, 68.915);
 
 export const SEED_MARKET: MarketData = {
   source: 'seed',
-  timestamp: '2026-08-25T16:38:00+03:00',
+  timestamp: '2026-08-25T21:00:00+03:00',
   dataDate: '25.08.2026',
   indices: {
-    xu100: { price: 14448, changePct: -0.37, asOf: '25.08.2026 16:38' },
-    usdtry: { price: 48.0987, changePct: 0.06, asOf: '25.08.2026 16:38' },
-    ounceGold: { price: 4615.8, changePct: -0.77, asOf: '25.08.2026 16:38' },
-    gramGold: { price: 7152.59, changePct: -0.53, asOf: '25.08.2026 16:38' },
-    ounceSilver: { price: 67.84, changePct: -1.56, asOf: '25.08.2026 11:15' },
+    xu100: { price: 14433.63, changePct: -0.47, asOf: '25.08.2026 kapanış' },
+    usdtry: { price: 48.1139, changePct: 0.05, asOf: '25.08.2026 kapanış' },
+    ounceGold: { price: 4720.5, changePct: 0.2, asOf: '25.08.2026 kapanış' },
+    gramGold: { price: 7220.45, changePct: 0.24, asOf: '25.08.2026 kapanış (BIST XGLD)' },
+    ounceSilver: { price: 68.915, changePct: null, asOf: '25.08.2026 kapanış' },
     goldSilverRatio: {
       value: SEED_RATIO.ratio,
       status: SEED_RATIO.status,
@@ -70,10 +76,10 @@ export const SEED_MARKET: MarketData = {
     interestRate: { value: 37.0, inflation: 31.75 },
   },
   positions: {
-    BURCE: { price: 36.34, changePct: 1.11, asOf: '25.08.2026 16:38' },
-    MASFN: { price: 43.18, changePct: -1.37, asOf: '25.08.2026 16:38' },
-    SARAE: { price: 88.1, changePct: -3.56, asOf: '24.08.2026' },
-    EKIM: { price: 19.31, changePct: null, asOf: '24.08.2026' },
+    BURCE: { price: 36.48, changePct: 1.5, asOf: '25.08.2026 kapanış' },
+    MASFN: { price: 43.06, changePct: -1.64, asOf: '25.08.2026 kapanış' },
+    SARAE: { price: 87.1, changePct: -1.14, asOf: '25.08.2026 kapanış' },
+    EKIM: { price: 18.82, changePct: -3.34, asOf: '25.08.2026 kapanış' },
     TLY: { price: 8948.48, changePct: 0.46, asOf: '25.08.2026' },
     DFI: { price: 5.6392, changePct: 0.62, asOf: '24.08.2026' },
     KGM: { price: 3.1474, changePct: -0.07, asOf: '24.08.2026' },
@@ -82,13 +88,15 @@ export const SEED_MARKET: MarketData = {
 };
 
 /* ------------------------------------------------------------------ */
-/* 1) LIVE — Sunucu tarafı veri çekiciler (best-effort, hepsi opsiyonel) */
+/* CANLI — Sunucu tarafı veri çekiciler (hepsi best-effort)            */
 /* ------------------------------------------------------------------ */
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-const FETCH_TIMEOUT_MS = 7000;
+const FETCH_TIMEOUT_MS = 8000;
+/** regularMarketTime bu süreden eskiyse feed "donmuş" sayılır (hafta sonu payı dahil). */
+const STALE_MS = 42 * 3600 * 1000;
 
 async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
   return fetch(url, {
@@ -99,23 +107,66 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Re
   });
 }
 
-/** Yahoo Finance chart API: son fiyat + önceki kapanışa göre günlük değişim. */
+/**
+ * Yahoo Finance chart API (range=1d → chartPreviousClose = DÜNÜN kapanışı,
+ * yani değişim yüzdesi GERÇEK günlük değişimdir).
+ * Tazelik kontrolü: regularMarketTime 42 saatten eskiyse veri reddedilir
+ * (Yahoo'nun donmuş ^XU100 gibi bozuk feed'lerini yakalar).
+ */
 async function fetchYahooQuote(symbol: string): Promise<MarketQuote | null> {
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
     const res = await fetchWithTimeout(url);
     if (!res.ok) return null;
     const json: any = await res.json();
     const meta = json?.chart?.result?.[0]?.meta;
     const price = Number(meta?.regularMarketPrice);
     if (!meta || !Number.isFinite(price) || price <= 0) return null;
-    const prev = Number(meta.chartPreviousClose ?? meta.previousClose);
+
+    const rmt = Number(meta.regularMarketTime); // unix saniye
+    if (Number.isFinite(rmt) && rmt > 0 && Date.now() - rmt * 1000 > STALE_MS) return null;
+
+    const prev = Number(meta.chartPreviousClose);
     const changePct = Number.isFinite(prev) && prev > 0
       ? Number((((price - prev) / prev) * 100).toFixed(2))
       : null;
     return { price, changePct, asOf: new Date().toLocaleDateString('tr-TR') };
   } catch {
     return null;
+  }
+}
+
+/**
+ * borsaningundemi.com piyasa ekranı — BIST endeksleri ve gram altın (XGLD).
+ * Ticker satırı yapısı:  XU100  14.434  -67,86  -0,47%
+ * Akıllı aralık (sanity) kontrolü: mantıksız değerler reddedilir, seed'e düşülür.
+ */
+async function fetchBorsaningundemiTickers(): Promise<{ xu100: MarketQuote | null; gramGold: MarketQuote | null }> {
+  try {
+    const res = await fetchWithTimeout('https://www.borsaningundemi.com/piyasa-ekrani');
+    if (!res.ok) return { xu100: null, gramGold: null };
+    const html = await res.text();
+
+    const pick = (code: string, sanity: (n: number) => boolean): MarketQuote | null => {
+      const idx = html.lastIndexOf(`>${code}<`);
+      if (idx < 0) return null;
+      const window_ = html.slice(idx, idx + 200);
+      const nums = window_.match(/-?[\d.]{1,9}(?:,\d{1,4})?/g) ?? [];
+      if (nums.length < 3 || !nums[0] || !nums[2]) return null;
+      const price = parseFloat(nums[0].replace(/\./g, '').replace(',', '.'));
+      const pct = parseFloat(nums[2].replace(',', '.'));
+      if (!Number.isFinite(price) || !sanity(price) || !Number.isFinite(pct)) return null;
+      return { price, changePct: pct, asOf: new Date().toLocaleDateString('tr-TR') };
+    };
+
+    return {
+      // BIST 100 makul aralık: 3.000 – 300.000 puan
+      xu100: pick('XU100', (n) => n > 3000 && n < 300000),
+      // BIST gram altın makul aralık: 100 – 100.000 TL
+      gramGold: pick('XGLD', (n) => n > 100 && n < 100000),
+    };
+  } catch {
+    return { xu100: null, gramGold: null };
   }
 }
 
@@ -153,7 +204,7 @@ async function fetchFonalyQuote(code: string): Promise<MarketQuote | null> {
 }
 
 interface LiveQuotes {
-  indices: Partial<Record<'xu100' | 'usdtry' | 'ounceGold' | 'ounceSilver', MarketQuote>>;
+  indices: Partial<Record<'xu100' | 'usdtry' | 'ounceGold' | 'gramGold' | 'ounceSilver', MarketQuote>>;
   positions: Record<string, MarketQuote>;
   okCount: number;
 }
@@ -161,11 +212,12 @@ interface LiveQuotes {
 /** Tüm canlı kaynakları paralel dener; hangisi tutarsa onu toplar. */
 async function fetchLiveQuotes(): Promise<LiveQuotes> {
   const [
-    xu100, usdtry, ounceGold, ounceSilver,
+    bng,
+    usdtry, ounceGold, ounceSilver,
     burce, masfn, sarae, ekim,
     tly, dfi, kgm, tp2,
   ] = await Promise.all([
-    fetchYahooQuote('^XU100'),
+    fetchBorsaningundemiTickers(),
     fetchYahooQuote('USDTRY=X'),
     fetchYahooQuote('GC=F'),
     fetchYahooQuote('SI=F'),
@@ -180,10 +232,19 @@ async function fetchLiveQuotes(): Promise<LiveQuotes> {
   ]);
 
   const indices: LiveQuotes['indices'] = {};
-  if (xu100) indices.xu100 = xu100;
+  if (bng.xu100) indices.xu100 = bng.xu100;
   if (usdtry) indices.usdtry = usdtry;
   if (ounceGold) indices.ounceGold = ounceGold;
   if (ounceSilver) indices.ounceSilver = ounceSilver;
+  // Gram altın: BIST XGLD öncelikli (perakende resmi fiyat); yoksa ons+USD'den türetilir.
+  if (bng.gramGold) indices.gramGold = bng.gramGold;
+  else if (indices.ounceGold && usdtry) {
+    indices.gramGold = {
+      price: Number(calculateGramGold(indices.ounceGold.price, usdtry.price).toFixed(2)),
+      changePct: null,
+      asOf: usdtry.asOf,
+    };
+  }
 
   const positions: Record<string, MarketQuote> = {};
   const map: [string, MarketQuote | null][] = [
@@ -192,14 +253,12 @@ async function fetchLiveQuotes(): Promise<LiveQuotes> {
   ];
   for (const [code, q] of map) if (q) positions[code] = q;
 
-  const okCount =
-    Object.keys(indices).length + Object.keys(positions).length;
-
+  const okCount = Object.keys(indices).length + Object.keys(positions).length;
   return { indices, positions, okCount };
 }
 
 /* ------------------------------------------------------------------ */
-/* Orkestrasyon: live dene → başarısızsa seed / son bilinen veriye dön  */
+/* Orkestrasyon: live dene → başarısızsa seed'e düş                    */
 /* ------------------------------------------------------------------ */
 
 const CACHE_TTL_MS = 60_000; // 60 sn — hem BIST hem TEFAS için uygun ritim
@@ -211,17 +270,7 @@ function assembleIndices(base: MarketData, live: LiveQuotes): MarketData['indice
   const usdtry = live.indices.usdtry ?? base.indices.usdtry;
   const ounceGold = live.indices.ounceGold ?? base.indices.ounceGold;
   const ounceSilver = live.indices.ounceSilver ?? base.indices.ounceSilver;
-
-  // Gram altın: canlı ons+USD varsa kendi formülümüzle türet, yoksa seed BIST gram.
-  const gramGold =
-    live.indices.ounceGold && live.indices.usdtry
-      ? {
-          price: Number(calculateGramGold(live.indices.ounceGold.price, live.indices.usdtry.price).toFixed(2)),
-          changePct: null,
-          asOf: live.indices.ounceGold.asOf,
-        }
-      : base.indices.gramGold;
-
+  const gramGold = live.indices.gramGold ?? base.indices.gramGold;
   const ratio = calculateGoldSilverRatio(ounceGold.price, ounceSilver.price);
 
   return {
@@ -239,7 +288,6 @@ export async function getMarketData(): Promise<MarketData> {
     const base: MarketData = cache?.data ?? SEED_MARKET;
     const live = await fetchLiveQuotes();
 
-    // En az 1 canlı veri geldi → canlı tabanına birleştir; hiçbiri gelmedi → seed/son veri.
     if (live.okCount > 0) {
       const positions: Record<string, MarketQuote> = { ...base.positions };
       for (const [code, q] of Object.entries(live.positions)) positions[code] = q;
@@ -256,11 +304,7 @@ export async function getMarketData(): Promise<MarketData> {
     }
 
     // Canlı kaynağa ulaşılamadı: son bilinen veriyi (seed) tarih bilgisiyle döndür.
-    const data: MarketData = {
-      ...base,
-      source: 'seed',
-      timestamp: new Date().toISOString(),
-    };
+    const data: MarketData = { ...base, source: 'seed', timestamp: new Date().toISOString() };
     cache = { data, at: Date.now() };
     return data;
   })();
