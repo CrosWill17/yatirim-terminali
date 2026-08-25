@@ -147,14 +147,19 @@ async function fetchBorsaningundemiTickers(): Promise<{ xu100: MarketQuote | nul
     if (!res.ok) return { xu100: null, gramGold: null };
     const html = await res.text();
 
+    // Ticker markup'ına ANAHLI regex: >KOD</strong> <strong>fiyat</strong>
+    // <strong>puan fark</strong> <strong>%değişim</strong>
+    // (sayfadaki JSON veri bloklarını — ör. {"XGLD":7210.616} — yakalamaz)
     const pick = (code: string, sanity: (n: number) => boolean): MarketQuote | null => {
-      const idx = html.lastIndexOf(`>${code}<`);
+      const idx = html.lastIndexOf(`>${code}</strong>`);
       if (idx < 0) return null;
-      const window_ = html.slice(idx, idx + 200);
-      const nums = window_.match(/-?[\d.]{1,9}(?:,\d{1,4})?/g) ?? [];
-      if (nums.length < 3 || !nums[0] || !nums[2]) return null;
-      const price = parseFloat(nums[0].replace(/\./g, '').replace(',', '.'));
-      const pct = parseFloat(nums[2].replace(',', '.'));
+      const window_ = html.slice(idx, idx + 400);
+      const m = window_.match(
+        /<strong[^>]*>([\d.]+(?:,\d+)?)<\/strong>[\s\S]{0,80}?<strong[^>]*>([+-]?[\d.,]+)<\/strong>[\s\S]{0,80}?<strong[^>]*>([+-]?[\d.,]+)%<\/strong>/
+      );
+      if (!m || !m[1] || !m[3]) return null;
+      const price = parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
+      const pct = parseFloat(m[3].replace(',', '.'));
       if (!Number.isFinite(price) || !sanity(price) || !Number.isFinite(pct)) return null;
       return { price, changePct: pct, asOf: new Date().toLocaleDateString('tr-TR') };
     };
