@@ -2,7 +2,7 @@ import './globals.css';
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'Yatırım Terminali v3.0 — BIST, Fon & Emtia',
+  title: 'Yatırım Terminali v3.1 — BIST, Fon & Emtia',
   description: 'Canlı Portföy Yönetim Paneli, Karar Merkezi & Sosyal Doğrulama Motoru',
 };
 
