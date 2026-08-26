@@ -201,36 +201,49 @@ async function fetchFonalyQuote(code: string): Promise<MarketQuote | null> {
     let changePct: number | null = null;
 
     // Öncelik: meta description ("güncel fon fiyatı 7.730,551937 ₺, günlük getiri +1.56%")
-    const priceMatch = html.match(/güncel fon fiyatı\s*([\d.]+(?:,\d+)?)/i);
-    const changeMatch = html.match(/günlük getiri\s*([+-]?[\d.,]+)/i);
+    const priceMatch = html.match(/güncel\s+fon\s+fiyatı\s*([\d.]+(?:,\d+)?)/i);
+    const changeMatch = html.match(/günlük\s+getiri\s*([+-]?[\d.,]+)\s*%/i);
     if (priceMatch) price = parseFloat(priceMatch[1].replace(/\./g, '').replace(',', '.'));
     if (changeMatch) changePct = parseFloat(changeMatch[1].replace(',', '.'));
 
     // Yedek: sayfa gövdesindeki "Birim Pay Fiyatı" bloğu
     if (price === null) {
-      const bodyMatch = html.match(/Birim Pay Fiyatı[\s\S]{0,300}?([\d.]{2,}(?:[.,]\d+)?)/i);
+      const bodyMatch = html.match(/Birim\s+Pay\s+Fiyatı[\s\S]{0,300}?([\d.]{2,}(?:[.,]\d+)?)/i);
       if (bodyMatch) price = parseFloat(bodyMatch[1].replace(/\./g, '').replace(',', '.'));
     }
-    // Yedek kalıplar (sırayla dene):
-    //  a) "günlük getiri [+0,46%]" — meta varyantları (sonek, iki nokta, %)
-    //  b) "Birim Pay Fiyatı ... [+0,46%]" — sayfa gövdesindeki ana veri bloğu
-    //     (oklar raw HTML'de SVG olabileceği için ok ARANMAZ)
-    //  c) "±% ▲/▼" — eski layout
+
+    // changePct yedek kalıpları (sırayla dene).
+    // Not: \s NBSP'yi de kapsar; SIGN Unicode eksi (U+2212)'i de tanır.
+    const SIGN = '[+\u2212-]';
+    //  a) "günlük getiri [+0,46%]" — meta varyantları (sonek, iki nokta, =)
     if (changePct === null) {
-      const m1 = html.match(/günlük getiri[sıı]*\s*[:=]?\s*([+-]?[\d.,]+)\s*%/i);
+      const m1 = html.match(new RegExp(`günlük\\s+getiri[sıı]*\\s*[:=]?\\s*(${SIGN}?[\\d.,]+)\\s*%`, 'i'));
       if (m1 && m1[1]) {
         const n = parseFloat(m1[1].replace(',', '.'));
         if (Number.isFinite(n) && Math.abs(n) < 30) changePct = n;
       }
     }
+    //  b) "Birim Pay Fiyatı ... [+0,46%]" — gövde bloğu (ok aranmaz: SVG olabilir)
+    //  c) "±% ▲/▼" — eski layout
     if (changePct === null) {
       const m2 =
-        html.match(/Birim Pay Fiyatı[\s\S]{0,200}?([+-])\s*([\d.,]+)\s*%/i) ??
-        html.match(/([+-])\s*([\d.,]+)\s*%\s*[▲▼]/);
+        html.match(new RegExp(`Birim\\s+Pay\\s+Fiyatı[\\s\\S]{0,200}?(${SIGN})\\s*([\\d.,]+)\\s*%`, 'i')) ??
+        html.match(new RegExp(`(${SIGN})\\s*([\\d.,]+)\\s*%\\s*[▲▼]`));
       if (m2 && m2[1] && m2[2]) {
         const n = parseFloat(m2[2].replace(',', '.'));
         if (Number.isFinite(n) && Math.abs(n) < 30) {
-          changePct = (m2[1] === '-' ? -1 : 1) * n;
+          changePct = (m2[1] === '+' ? 1 : -1) * n;
+        }
+      }
+    }
+    //  d) Son çare: fiyat rakamlarının hemen ardındaki ilk ±% (metinden bağımsız)
+    if (changePct === null && price !== null) {
+      const prefix = String(price).slice(0, 5).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const m3 = html.match(new RegExp(`${prefix}[\\d.,]*[\\s\\S]{0,80}?(${SIGN})\\s*([\\d.,]+)\\s*%`));
+      if (m3 && m3[1] && m3[2]) {
+        const n = parseFloat(m3[2].replace(',', '.'));
+        if (Number.isFinite(n) && Math.abs(n) < 30) {
+          changePct = (m3[1] === '+' ? 1 : -1) * n;
         }
       }
     }
