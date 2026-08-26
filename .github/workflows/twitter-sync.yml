@@ -1,0 +1,54 @@
+name: twitter-sync
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: twitter-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Kur (twitter-cli 0.8.5 + pyyaml + npm)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "twitter-cli==0.8.5" pyyaml
+          npm ci
+
+      - name: 1/2 Tweetleri çek (twitter-cli → data/tweets.json)
+        env:
+          TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
+          TWITTER_CT0: ${{ secrets.TWITTER_CT0 }}
+          TWITTER_SYNC_HANDLE: sevketozhan
+          TWITTER_SYNC_COUNT: '50'
+        run: python scripts/twitter_sync/fetch_tweets.py
+
+      - name: 2/2 Parse + Supabase (yalnızca social_predictions)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          AUTO_VERIFY: '1'
+        run: npx -y tsx@4 scripts/twitter_sync/sync.ts
+
+      - name: Temizlik (tweet metinleri workspace'te kalmasın)
+        if: always()
+        run: rm -f data/tweets.json
