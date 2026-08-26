@@ -211,9 +211,28 @@ async function fetchFonalyQuote(code: string): Promise<MarketQuote | null> {
       const bodyMatch = html.match(/Birim Pay Fiyatı[\s\S]{0,300}?([\d.]{2,}(?:[.,]\d+)?)/i);
       if (bodyMatch) price = parseFloat(bodyMatch[1].replace(/\./g, '').replace(',', '.'));
     }
+    // Yedek kalıplar (sırayla dene):
+    //  a) "günlük getiri [+0,46%]" — meta varyantları (sonek, iki nokta, %)
+    //  b) "Birim Pay Fiyatı ... [+0,46%]" — sayfa gövdesindeki ana veri bloğu
+    //     (oklar raw HTML'de SVG olabileceği için ok ARANMAZ)
+    //  c) "±% ▲/▼" — eski layout
     if (changePct === null) {
-      const pctMatch = html.match(/([+-])\s*([\d.,]+)\s*%\s*[▲▼]/);
-      if (pctMatch) changePct = (pctMatch[1] === '-' ? -1 : 1) * parseFloat(pctMatch[2].replace(',', '.'));
+      const m1 = html.match(/günlük getiri[sıı]*\s*[:=]?\s*([+-]?[\d.,]+)\s*%/i);
+      if (m1 && m1[1]) {
+        const n = parseFloat(m1[1].replace(',', '.'));
+        if (Number.isFinite(n) && Math.abs(n) < 30) changePct = n;
+      }
+    }
+    if (changePct === null) {
+      const m2 =
+        html.match(/Birim Pay Fiyatı[\s\S]{0,200}?([+-])\s*([\d.,]+)\s*%/i) ??
+        html.match(/([+-])\s*([\d.,]+)\s*%\s*[▲▼]/);
+      if (m2 && m2[1] && m2[2]) {
+        const n = parseFloat(m2[2].replace(',', '.'));
+        if (Number.isFinite(n) && Math.abs(n) < 30) {
+          changePct = (m2[1] === '-' ? -1 : 1) * n;
+        }
+      }
     }
 
     if (!Number.isFinite(price as number) || (price as number) <= 0) return null;
