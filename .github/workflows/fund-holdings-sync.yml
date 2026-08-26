@@ -1,0 +1,34 @@
+name: fund-holdings-sync
+
+on:
+  schedule:
+    - cron: '0 9 * * 1,4'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fund-holdings-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Kur (npm)
+        run: npm ci
+
+      - name: Fon içeriğini çek + parse + Supabase (yalnızca fund_holdings)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx -y tsx@4 scripts/fund_holdings/sync.ts
