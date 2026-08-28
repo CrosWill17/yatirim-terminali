@@ -63,7 +63,17 @@ def main() -> None:
         print("HATA: twitter-cli çıktısı YAML olarak çözülemedi.", file=sys.stderr)
         sys.exit(5)
 
-    # Yapı toleransı: liste ya da {tweets: [...]} / {statuses: [...]} olabilir.
+       # Yapı toleransı:
+    #  - liste: [tweet, ...]
+    #  - envlopu: {ok, schema_version, data} (twitter-cli 0.8.5) → tweetler data altında
+    #  - {tweets: [...]} / {statuses: [...]} / {results: [...]}
+    if isinstance(data, dict):
+        if data.get("ok") is False:
+            err = str(data.get("error") or data.get("message") or "bilinmeyen hata")[:200]
+            print(f"HATA: twitter-cli ok=false → {err}", file=sys.stderr)
+            sys.exit(8)
+        if "data" in data:
+            data = data["data"]
     if isinstance(data, list):
         raw_tweets = data
     elif isinstance(data, dict):
@@ -91,9 +101,10 @@ def main() -> None:
         json.dump(out, f, ensure_ascii=False, indent=2)
 
     # stdout: yalnızca sayı ve dosya (secret YOK)
-    print(f"OK: {len(out)} tweet çekildi → data/tweets.json")
     if not out:
-        print("UYARI: Tweet listesi boş (kimlik doğrulama mı?)", file=sys.stderr)
+        first = raw_tweets[0] if raw_tweets else None
+        first_keys = list(first.keys()) if isinstance(first, dict) else (type(first).__name__ if first is not None else "veri yok")
+        print(f"UYARI: Çözümlenen tweet 0 — örnek anahtarları: {first_keys} (alan adları farklı olabilir)", file=sys.stderr)
         sys.exit(7)
 
 
