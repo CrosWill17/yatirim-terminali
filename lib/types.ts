@@ -70,13 +70,14 @@ export interface SocialPrediction {
   id: string;
   predictor_handle: string;
   fund_code: string;
-  predicted_return_pct: number;
+  /** null = sayı çözülemedi (VERİ EKSİK) — uydurma değer yok. */
+  predicted_return_pct: number | null;
   prediction_category: string;
   raw_text: string;
   prediction_date: string;
-  actual_return_pct?: number;
-  accuracy_score?: number;
-  status: 'BEKLIYOR' | 'DOGRULANDI' | 'GECERSIZ';
+  actual_return_pct?: number | null;
+  accuracy_score?: number | null;
+  status: 'BEKLIYOR' | 'DOGRULANDI' | 'GECERSIZ' | 'VERI_EKSİK';
 }
 
 export interface MarketTicker {
