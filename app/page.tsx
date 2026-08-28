@@ -22,16 +22,33 @@ import {
 
 /* ------------------------------------------------------------------ */
 /* Yerleşik başlangıç verileri (20.08.2026) — DB boşsa buradan aktarılır */
+/* Varlık adları resmî kaynaklardan doğrulanmıştır (26.08.2026):        */
+/*   Hisseler → Yahoo Finance meta (longName), Fonlar → fonaly.com/TEFAS */
 /* ------------------------------------------------------------------ */
+
+/** Kanonik varlık adları + türleri. DB'deki eski adlar bu eşlemeyle senkronize edilir. */
+const ASSET_META: Record<string, { name: string; type: Position['asset_type'] }> = {
+  BURCE: { name: 'Burçelik Bursa Çelik Döküm Sanayii A.Ş.', type: 'BIST_HISSE' },
+  MASFN: { name: 'Masfen Enerji A.Ş.', type: 'BIST_HISSE' },
+  SARAE: { name: 'Sa-Ra Enerji İnşaat Ticaret ve Sanayi A.Ş.', type: 'BIST_HISSE' },
+  EKIM: { name: 'Ekim Turizm Ticaret ve Sanayi A.Ş.', type: 'BIST_HISSE' },
+  TLY: { name: 'Tera Portföy Birinci Serbest Fon', type: 'TEFAS_FON' },
+  DFI: { name: 'Atlas Portföy Serbest Fon', type: 'TEFAS_FON' },
+  KGM: { name: 'Kuveyt Türk Portföy Gümüş Katılım Fon Sepeti', type: 'TEFAS_FON' },
+  TP2: { name: 'Tera Portföy Para Piyasası (TL) Fonu', type: 'PPF' },
+};
+
+const TÜR_LABEL: Record<string, string> = { BIST_HISSE: 'BİST HİSSE', TEFAS_FON: 'TEFAS FON', PPF: 'PARA PİYASASI' };
+
 const SEED_POSITIONS: Position[] = [
-  { id: '1', symbol: 'BURCE', asset_name: 'Burçelik Vana', asset_type: 'BIST_HISSE', quantity: 3938, unit_cost: 40.96, target_price: 53.40, stop_price: 32.50, risk_score: 10, current_action: 'KADEMELİ SAT', rationale: 'Zarar eden şirket (F/K -24.2, PD/DD 2.45). Merdivenli çıkış (%5 ağırlığa iniş).', is_active: true },
-  { id: '2', symbol: 'KGM', asset_name: 'QNB Gümüş Fon Sepeti', asset_type: 'TEFAS_FON', quantity: 25000, unit_cost: 2.99, target_price: 3.40, stop_price: 2.60, risk_score: 7, current_action: 'TUT', rationale: 'Gümüşe %95 endeksli. Tek emtia yoğunluğu 25.000 paya indirildi, stop korumalı.', is_active: true },
-  { id: '3', symbol: 'TLY', asset_name: 'Tera Portföy 1. Hisse Fonu', asset_type: 'TEFAS_FON', quantity: 7, unit_cost: 6493, target_price: 9900, stop_price: 7250, risk_score: 9, current_action: '2/3 ÇIKIŞ', rationale: 'OZATD tek hisse %34.27 risk konsantrasyonu. 2/3 kâr al, 1/3 stop korumalı TUT.', is_active: true },
-  { id: '4', symbol: 'DFI', asset_name: 'Deniz Portföy 1. Hisse Fonu', asset_type: 'TEFAS_FON', quantity: 10400, unit_cost: 3.846, target_price: 6.10, stop_price: 4.60, risk_score: 9, current_action: 'TUT', rationale: '27 hisseye dağılmış (%53 hisse + %28 fon). 2024 LIDER geçmişi sebebiyle stop korumalı.', is_active: true },
-  { id: '5', symbol: 'TP2', asset_name: 'Tacirler Para Piyasası Fonu', asset_type: 'PPF', quantity: 24197, unit_cost: 1.963, target_price: 2.20, stop_price: 1.96, risk_score: 1, current_action: 'TUT', rationale: 'Nakit park yeri. Politika faizi %37, TÜFE %31.75 ortamında pozitif reel getiri.', is_active: true },
-  { id: '6', symbol: 'MASFN', asset_name: 'Master Finans Faktoring', asset_type: 'BIST_HISSE', quantity: 486, unit_cost: 45.68, target_price: 52.00, stop_price: 39.50, risk_score: 7, current_action: 'TUT', rationale: 'F/K ~12.2, HBK 3.58, USD fonksiyonel para avantajı.', is_active: true },
-  { id: '7', symbol: 'SARAE', asset_name: 'Saray Matbaacılık', asset_type: 'BIST_HISSE', quantity: 211, unit_cost: 70.00, target_price: 90.00, stop_price: 68.00, risk_score: 8, current_action: 'TUT', rationale: '88-97 bandında kâr al (Fib %23.6 = 88.1).', is_active: true },
-  { id: '8', symbol: 'EKIM', asset_name: 'Ekim Varlık Kiralama', asset_type: 'BIST_HISSE', quantity: 630, unit_cost: 30.26, target_price: 22.00, stop_price: 18.37, risk_score: 10, current_action: 'SAT', rationale: 'HBK -2.06, Beta 2.79. İlk tepkide veya 18.37 dibi kırılırsa acil satış.', is_active: true }
+  { id: '1', symbol: 'BURCE', asset_name: 'Burçelik Bursa Çelik Döküm Sanayii A.Ş.', asset_type: 'BIST_HISSE', quantity: 3938, unit_cost: 40.96, target_price: 53.40, stop_price: 32.50, risk_score: 10, current_action: 'KADEMELİ SAT', rationale: 'Zarar eden şirket (F/K -24.2, PD/DD 2.45). Merdivenli çıkış (%5 ağırlığa iniş).', is_active: true },
+  { id: '2', symbol: 'KGM', asset_name: 'Kuveyt Türk Portföy Gümüş Katılım Fon Sepeti', asset_type: 'TEFAS_FON', quantity: 25000, unit_cost: 2.99, target_price: 3.40, stop_price: 2.60, risk_score: 7, current_action: 'TUT', rationale: 'Gümüşe %95 endeksli. Tek emtia yoğunluğu 25.000 paya indirildi, stop korumalı.', is_active: true },
+  { id: '3', symbol: 'TLY', asset_name: 'Tera Portföy Birinci Serbest Fon', asset_type: 'TEFAS_FON', quantity: 7, unit_cost: 6493, target_price: 9900, stop_price: 7250, risk_score: 9, current_action: '2/3 ÇIKIŞ', rationale: 'OZATD tek hisse %34.27 risk konsantrasyonu. 2/3 kâr al, 1/3 stop korumalı TUT.', is_active: true },
+  { id: '4', symbol: 'DFI', asset_name: 'Atlas Portföy Serbest Fon', asset_type: 'TEFAS_FON', quantity: 10400, unit_cost: 3.846, target_price: 6.10, stop_price: 4.60, risk_score: 9, current_action: 'TUT', rationale: '27 hisseye dağılmış (%53 hisse + %28 fon). 2024 LIDER geçmişi sebebiyle stop korumalı.', is_active: true },
+  { id: '5', symbol: 'TP2', asset_name: 'Tera Portföy Para Piyasası (TL) Fonu', asset_type: 'PPF', quantity: 24197, unit_cost: 1.963, target_price: 2.20, stop_price: 1.96, risk_score: 1, current_action: 'TUT', rationale: 'Nakit park yeri. Politika faizi %37, TÜFE %31.75 ortamında pozitif reel getiri.', is_active: true },
+  { id: '6', symbol: 'MASFN', asset_name: 'Masfen Enerji A.Ş.', asset_type: 'BIST_HISSE', quantity: 486, unit_cost: 45.68, target_price: 52.00, stop_price: 39.50, risk_score: 7, current_action: 'TUT', rationale: 'F/K ~12.2, HBK 3.58, USD fonksiyonel para avantajı.', is_active: true },
+  { id: '7', symbol: 'SARAE', asset_name: 'Sa-Ra Enerji İnşaat Ticaret ve Sanayi A.Ş.', asset_type: 'BIST_HISSE', quantity: 211, unit_cost: 70.00, target_price: 90.00, stop_price: 68.00, risk_score: 8, current_action: 'TUT', rationale: '88-97 bandında kâr al (Fib %23.6 = 88.1).', is_active: true },
+  { id: '8', symbol: 'EKIM', asset_name: 'Ekim Turizm Ticaret ve Sanayi A.Ş.', asset_type: 'BIST_HISSE', quantity: 630, unit_cost: 30.26, target_price: 22.00, stop_price: 18.37, risk_score: 10, current_action: 'SAT', rationale: 'HBK -2.06, Beta 2.79. İlk tepkide veya 18.37 dibi kırılırsa acil satış.', is_active: true }
 ];
 
 const SEED_DECISIONS: Decision[] = [
@@ -142,6 +159,15 @@ export default function Home() {
       }
 
       if (bundle.positions.length > 0) setPositions(bundle.positions);
+
+      // Kanonik ad/tür senkronu: eski seed adları resmî adlarla güncelle (bir kez)
+      bundle.positions.forEach((p) => {
+        const m = ASSET_META[p.symbol];
+        if (m && (p.asset_name !== m.name || p.asset_type !== m.type)) {
+          upsertPosition({ ...p, asset_name: m.name, asset_type: m.type });
+        }
+      });
+
       if (bundle.decisions.length > 0) setDecisions(bundle.decisions);
       setTransactions(bundle.transactions);
       setCashMovements(bundle.cashMovements);
@@ -155,13 +181,29 @@ export default function Home() {
 
   /* ------------------- Türetilmiş Değerler ------------------------ */
   // Portföy pozisyonlarını canlı fiyatlarla birleştir
+  // + kanonik varlık adı/türü (eski seed adları otomatik düzeltilir)
   const livePositions: Position[] = positions.map((pos) => {
+    const meta = ASSET_META[pos.symbol];
     const q = market.positions?.[pos.symbol];
+    const base: Position = { ...pos, asset_name: meta?.name ?? pos.asset_name, asset_type: meta?.type ?? pos.asset_type };
     if (q && typeof q.price === 'number' && q.price > 0 && pos.quantity > 0) {
-      return { ...pos, current_price: q.price, daily_change_pct: q.changePct };
+      return { ...base, current_price: q.price, daily_change_pct: q.changePct };
     }
-    return pos;
+    return base;
   });
+
+  // Portföy sıralaması: HİSSELER ve FONLAR ayrı gruplar, her grupta değere göre azalan
+  const posValue = (p: Position) => p.quantity * (p.current_price || p.unit_cost);
+  const stockRows = livePositions
+    .filter((p) => p.asset_type === 'BIST_HISSE')
+    .sort((a, b) => posValue(b) - posValue(a));
+  const fundRows = livePositions
+    .filter((p) => p.asset_type !== 'BIST_HISSE')
+    .sort((a, b) => posValue(b) - posValue(a));
+  const stockTotal = stockRows.reduce((s, p) => s + posValue(p), 0);
+  const fundTotal = fundRows.reduce((s, p) => s + posValue(p), 0);
+  const stockPnl = stockRows.reduce((s, p) => s + posValue(p) - p.quantity * p.unit_cost, 0);
+  const fundPnl = fundRows.reduce((s, p) => s + posValue(p) - p.quantity * p.unit_cost, 0);
 
   const totalStockAndFundValue = livePositions.reduce((acc, pos) => acc + (pos.quantity * (pos.current_price || pos.unit_cost)), 0);
   const totalPortfolioValue = totalStockAndFundValue + cashBalance;
@@ -194,23 +236,28 @@ export default function Home() {
   const dangerCount = alerts.filter((a) => a.level === 'DANGER').length;
   const warnCount = alerts.filter((a) => a.level === 'WARN').length;
 
-  // Grafik verileri
+  // Grafik verileri — sıralama: hisseler (değere göre) → fonlar (değere göre) → nakit
+  const orderedPositions = useMemo(
+    () => [...stockRows, ...fundRows].filter((p) => p.quantity > 0),
+    [livePositions] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   const allocData = useMemo(() => {
-    const rows = livePositions.filter((p) => p.quantity > 0).map((p, i) => ({
+    const rows = orderedPositions.map((p, i) => ({
       name: p.symbol,
-      value: Number((p.quantity * (p.current_price || p.unit_cost)).toFixed(2)),
+      value: Number(posValue(p).toFixed(2)),
       color: CHART_COLORS[i % CHART_COLORS.length],
     }));
     rows.push({ name: 'NAKİT', value: Number(cashBalance.toFixed(2)), color: '#10b981' });
     return rows;
-  }, [livePositions, cashBalance]);
+  }, [orderedPositions, cashBalance]);
 
   const pnlData = useMemo(
-    () => livePositions.filter((p) => p.quantity > 0).map((p) => ({
+    () => orderedPositions.map((p) => ({
       name: p.symbol,
-      pnl: Number((p.quantity * (p.current_price || p.unit_cost) - p.quantity * p.unit_cost).toFixed(0)),
+      pnl: Number((posValue(p) - p.quantity * p.unit_cost).toFixed(0)),
     })),
-    [livePositions]
+    [orderedPositions]
   );
 
   // Günlük değişim rozeti
@@ -226,6 +273,49 @@ export default function Home() {
   };
 
   const fmtTl = (v: number, digits = 0) => v.toLocaleString('tr-TR', { maximumFractionDigits: digits });
+
+  // Portföy tablosu satırı (hisse ve fon gruplarında ortak)
+  const renderPosRow = (pos: Position) => {
+    const value = pos.quantity * (pos.current_price || pos.unit_cost);
+    const pnl = value - (pos.quantity * pos.unit_cost);
+    const asOf = market.positions?.[pos.symbol]?.asOf;
+    const stopBreached = pos.stop_price && pos.current_price != null && pos.current_price <= pos.stop_price;
+    return (
+      <tr key={pos.id} className="hover:bg-slate-800/30 transition-colors">
+        <td className="p-3 font-bold text-sky-400" title={asOf ? `Son fiyat tarihi: ${asOf}` : undefined}>{pos.symbol}</td>
+        <td className="p-3 text-slate-300" title={pos.rationale}>{pos.asset_name}</td>
+        <td className="p-3 text-slate-400 text-[10px]">{TÜR_LABEL[pos.asset_type] ?? pos.asset_type}</td>
+        <td className="p-3 text-right text-slate-200">{pos.quantity.toLocaleString('tr-TR', { maximumFractionDigits: 4 })}</td>
+        <td className="p-3 text-right text-slate-300">{pos.unit_cost.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} TL</td>
+        <td className="p-3 text-right font-bold text-slate-100">{(pos.current_price || pos.unit_cost).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} TL</td>
+        <td className={`p-3 text-right font-bold ${
+          pos.daily_change_pct === null || pos.daily_change_pct === undefined
+            ? 'text-slate-500'
+            : pos.daily_change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+        }`}>
+          {pos.daily_change_pct === null || pos.daily_change_pct === undefined
+            ? '—'
+            : `${pos.daily_change_pct >= 0 ? '+' : ''}${pos.daily_change_pct.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}%`}
+        </td>
+        <td className="p-3 text-right font-bold text-slate-200">{value.toLocaleString('tr-TR', { maximumFractionDigits: 0 })} TL</td>
+        <td className={`p-3 text-right font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+          {pnl >= 0 ? '+' : ''}{pnl.toLocaleString('tr-TR', { maximumFractionDigits: 0 })} TL
+        </td>
+        <td className={`p-3 text-center font-bold ${stopBreached ? 'text-rose-400' : 'text-rose-400/70'}`}>
+          {pos.stop_price ? `${pos.stop_price.toLocaleString('tr-TR')} TL${stopBreached ? ' ⛔' : ''}` : '—'}
+        </td>
+        <td className="p-3 text-center">
+          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+            pos.current_action.includes('SAT') || pos.current_action.includes('ÇIKIŞ') || pos.current_action === 'KAPANDI'
+              ? 'bg-rose-950 text-rose-300 border border-rose-800'
+              : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+          }`}>
+            {pos.current_action}
+          </span>
+        </td>
+      </tr>
+    );
+  };
 
   /* ----------------------- Aksiyonlar ----------------------------- */
 
@@ -368,7 +458,7 @@ export default function Home() {
           prediction_category: p.category,
           raw_text: tweetInput,
           prediction_date: new Date().toISOString().split('T')[0],
-          status: 'BEKLIYOR',
+          status: p.predictedReturnPct == null ? 'VERI_EKSİK' : 'BEKLIYOR',
         };
         setPredictions((prev) => [newPred, ...prev]);
         insertPrediction(newPred);
@@ -389,7 +479,7 @@ export default function Home() {
     const actual = parseFloat(verifyPct.replace(',', '.'));
     if (!Number.isFinite(actual)) return;
     const pred = predictions.find((p) => p.id === verifyId);
-    if (!pred) return;
+    if (!pred || pred.predicted_return_pct == null) return; // VERİ EKSİK satır doğrulanamaz
     const acc = calculateAccuracyScore(pred.predicted_return_pct, actual);
     const newTrust = updateTrustScore(trustScore, acc);
     const updated: SocialPrediction = { ...pred, actual_return_pct: actual, accuracy_score: acc, status: 'DOGRULANDI' };
@@ -752,47 +842,18 @@ export default function Home() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
-                  {livePositions.map((pos) => {
-                    const value = pos.quantity * (pos.current_price || pos.unit_cost);
-                    const pnl = value - (pos.quantity * pos.unit_cost);
-                    const asOf = market.positions?.[pos.symbol]?.asOf;
-                    const stopBreached = pos.stop_price && pos.current_price != null && pos.current_price <= pos.stop_price;
-                    return (
-                      <tr key={pos.id} className="hover:bg-slate-800/30 transition-colors">
-                        <td className="p-3 font-bold text-sky-400" title={asOf ? `Son fiyat tarihi: ${asOf}` : undefined}>{pos.symbol}</td>
-                        <td className="p-3 text-slate-300">{pos.asset_name}</td>
-                        <td className="p-3 text-slate-400 text-[10px]">{pos.asset_type}</td>
-                        <td className="p-3 text-right text-slate-200">{pos.quantity.toLocaleString('tr-TR', { maximumFractionDigits: 4 })}</td>
-                        <td className="p-3 text-right text-slate-300">{pos.unit_cost.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} TL</td>
-                        <td className="p-3 text-right font-bold text-slate-100">{(pos.current_price || pos.unit_cost).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} TL</td>
-                        <td className={`p-3 text-right font-bold ${
-                          pos.daily_change_pct === null || pos.daily_change_pct === undefined
-                            ? 'text-slate-500'
-                            : pos.daily_change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                        }`}>
-                          {pos.daily_change_pct === null || pos.daily_change_pct === undefined
-                            ? '—'
-                            : `${pos.daily_change_pct >= 0 ? '+' : ''}${pos.daily_change_pct.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}%`}
-                        </td>
-                        <td className="p-3 text-right font-bold text-slate-200">{value.toLocaleString('tr-TR', { maximumFractionDigits: 0 })} TL</td>
-                        <td className={`p-3 text-right font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {pnl >= 0 ? '+' : ''}{pnl.toLocaleString('tr-TR', { maximumFractionDigits: 0 })} TL
-                        </td>
-                        <td className={`p-3 text-center font-bold ${stopBreached ? 'text-rose-400' : 'text-rose-400/70'}`}>
-                          {pos.stop_price ? `${pos.stop_price.toLocaleString('tr-TR')} TL${stopBreached ? ' ⛔' : ''}` : '—'}
-                        </td>
-                        <td className="p-3 text-center">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            pos.current_action.includes('SAT') || pos.current_action.includes('ÇIKIŞ') || pos.current_action === 'KAPANDI'
-                              ? 'bg-rose-950 text-rose-300 border border-rose-800'
-                              : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                          }`}>
-                            {pos.current_action}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  <tr className="bg-sky-950/40">
+                    <td colSpan={12} className="px-3 py-2 text-[10px] font-bold text-sky-300 tracking-wider">
+                      📈 BİST HİSSELERİ ({stockRows.length}) — Toplam: {fmtTl(stockTotal)} TL · K/Z: {stockPnl >= 0 ? '+' : ''}{fmtTl(stockPnl)} TL
+                    </td>
+                  </tr>
+                  {stockRows.map(renderPosRow)}
+                  <tr className="bg-emerald-950/30">
+                    <td colSpan={12} className="px-3 py-2 text-[10px] font-bold text-emerald-300 tracking-wider">
+                      🏦 TEFAS FONLARI ({fundRows.length}) — Toplam: {fmtTl(fundTotal)} TL · K/Z: {fundPnl >= 0 ? '+' : ''}{fmtTl(fundPnl)} TL
+                    </td>
+                  </tr>
+                  {fundRows.map(renderPosRow)}
                 </tbody>
               </table>
             </div>
@@ -879,7 +940,7 @@ export default function Home() {
               <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
                 <input list="tx-symbols" value={txSymbol} onChange={(e) => setTxSymbol(e.target.value)} placeholder="KOD (BURCE)" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500 uppercase" />
                 <datalist id="tx-symbols">
-                  {positions.filter((p) => p.quantity > 0).map((p) => <option key={p.symbol} value={p.symbol}>{p.asset_name}</option>)}
+                  {livePositions.filter((p) => p.quantity > 0).map((p) => <option key={p.symbol} value={p.symbol}>{p.asset_name}</option>)}
                 </datalist>
                 <select value={txType} onChange={(e) => setTxType(e.target.value as any)} className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500">
                   <option value="ALIS">ALIŞ</option>
@@ -1060,21 +1121,29 @@ export default function Home() {
                         <span className="bg-slate-800 px-1.5 py-0.5 rounded text-[10px] text-amber-300 font-bold">{pred.fund_code}</span>
                         <span className="text-slate-400 text-[10px] bg-slate-800/60 px-1.5 py-0.5 rounded">{pred.prediction_category}</span>
                         <span className="text-slate-400 text-[10px]">{pred.prediction_date}</span>
-                        <span className="text-slate-300">Tahmin: %{pred.predicted_return_pct.toLocaleString('tr-TR')}</span>
-                        {pred.actual_return_pct !== undefined && (
+                        <span className="text-slate-300">
+                          Tahmin: {pred.predicted_return_pct != null
+                            ? `%${pred.predicted_return_pct.toLocaleString('tr-TR')}`
+                            : '— (VERİ EKSİK)'}
+                        </span>
+                        {pred.actual_return_pct != null && (
                           <span className="text-emerald-400 font-bold">Gerçekleşen: %{pred.actual_return_pct.toLocaleString('tr-TR')}</span>
                         )}
                       </div>
 
                       <div className="flex items-center gap-2">
-                        {pred.accuracy_score !== undefined ? (
+                        {pred.accuracy_score != null ? (
                           <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-1 rounded text-[10px] font-bold">
                             İsabet: {pred.accuracy_score} Puan
                           </span>
                         ) : (
                           <>
-                            <span className="bg-amber-950 text-amber-300 border border-amber-800 px-2 py-1 rounded text-[10px] font-bold">BEKLİYOR</span>
-                            {verifyId === pred.id ? (
+                            <span className={`px-2 py-1 rounded text-[10px] font-bold border ${
+                              pred.status === 'VERI_EKSİK'
+                                ? 'bg-slate-800 text-slate-400 border-slate-600'
+                                : 'bg-amber-950 text-amber-300 border-amber-800'
+                            }`}>{pred.status}</span>
+                            {pred.predicted_return_pct != null && (verifyId === pred.id ? (
                               <span className="flex items-center gap-1">
                                 <input
                                   value={verifyPct}
@@ -1091,7 +1160,7 @@ export default function Home() {
                               >
                                 İSABETİ DOĞRULA
                               </button>
-                            )}
+                            ))}
                           </>
                         )}
                       </div>
@@ -1116,15 +1185,16 @@ export default function Home() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-slate-900 p-4 rounded border border-slate-800 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Piyasa Verisi (Yahoo Finance):</span>
+                  <span className="text-slate-400">Piyasa Verisi (BNG + Yahoo):</span>
                   <span className={`font-bold flex items-center gap-1 ${market.source === 'live' ? 'text-emerald-400' : 'text-amber-400'}`}>
                     {market.source === 'live' ? '🟢 CANLI BAĞLANTI' : '🟡 SON VERİ (25.08.2026)'}
                   </span>
                 </div>
                 <p className="text-slate-500 text-[10px]">
-                  BIST 100, USD/TRY, ons altın & gümüş, BIST hisseleri — 60 sn'de bir çekilir.
-                  Kaynağa ulaşılamayan ortamlarda (ör. bu kumanda kutusu) gerçek 25.08.2026 snapshot'ı kullanılır.
-                  Vercel'e deploy edilince otomatik CANLI olur.
+                  BIST 100 & gram altın: borsaningundemi.com piyasa ekranı (canlı scrape).
+                  USD/TRY, ons altın/gümüş, BIST hisseleri (BURCE, MASFN, SARAE, EKIM): Yahoo Finance.
+                  60 sn'de bir çekilir; 42 saatten eski feed'ler tazelik kontrolüyle reddedilir.
+                  Kaynağa ulaşılamayan ortamlarda gerçek 25.08.2026 kapanış snapshot'ı kullanılır.
                   Son çekim: {new Date(market.timestamp).toLocaleString('tr-TR')}.
                 </p>
               </div>
