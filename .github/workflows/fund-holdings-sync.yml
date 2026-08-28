@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  artifacts: write
 
 concurrency:
   group: fund-holdings-sync
@@ -21,7 +22,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Kur (npm)
@@ -32,3 +33,19 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: npx -y tsx@4 scripts/fund_holdings/sync.ts
+
+      - name: "Teşhis: DFI ham HTML arşiv (yalnızca tanı amaçlı, hiçbir tabloya yazmaz)"
+        if: always()
+        run: |
+          curl -sL --max-time 30 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' -H 'accept: text/html' 'https://fintables.com/fonlar/DFI' -o dfi-live.html || echo "curl hatası"
+          echo "DFI boyut: $(wc -c < dfi-live.html 2>/dev/null || echo 0) bayt"
+          echo "sirketler/ sayaci: $(grep -c 'sirketler/' dfi-live.html 2>/dev/null || true)"
+          echo "IEYHO sayaci: $(grep -c 'IEYHO' dfi-live.html 2>/dev/null || true)"
+
+      - name: "Arsiv: dfi-live-html"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dfi-live-html
+          path: dfi-live.html
+          if-no-files-found: ignore
