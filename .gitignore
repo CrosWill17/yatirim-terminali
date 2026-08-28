@@ -28,3 +28,8 @@ npm-debug.log*
 # Test & type-check caches
 coverage/
 *.tsbuildinfo
+
+# twitter-sync geçici veri (tweet metinleri depoda kalmasın)
+data/
+__pycache__/
+*.pyc
