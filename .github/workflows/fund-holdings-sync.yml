@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  artifacts: write
 
 concurrency:
   group: fund-holdings-sync
