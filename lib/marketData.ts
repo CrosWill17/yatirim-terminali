@@ -18,6 +18,8 @@
  */
 
 import { calculateGramGold, calculateGoldSilverRatio } from './calculations';
+import type { PublicKind } from './publicWatchlist';
+import { publicInstruments } from './publicWatchlist';
 
 export interface MarketQuote {
   price: number;
@@ -366,4 +368,151 @@ export async function getMarketData(): Promise<MarketData> {
   } finally {
     inFlight = null;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* HALKA AÇIK PİYASA VERİSİ (P1 — Misafir Modu)                        */
+/*                                                                     */
+/* Yalnızca kamuya açık enstrümanlar: endeksler + lib/publicWatchlist.  */
+/* Portföy kodları bu çıktıda YER ALMAZ.                               */
+/* Fiyatı çözülemeyen satır → price: null → arayüzde "VERİ EKSİK".     */
+/* ------------------------------------------------------------------ */
+
+export interface PublicInstrumentQuote {
+  symbol: string;
+  name: string;
+  kind: PublicKind;
+  group: string;
+  /** Fiyat kaynağıyla doğrulanmış ticker mı? */
+  verified: boolean;
+  /** null = fiyat çözülemedi (VERİ EKSİK) — uydurma değer yok. */
+  price: number | null;
+  changePct: number | null;
+  asOf: string | null;
+}
+
+export interface PublicMarketData {
+  source: 'live' | 'seed';
+  timestamp: string;
+  dataDate: string;
+  indices: MarketData['indices'];
+  instruments: PublicInstrumentQuote[];
+}
+
+let publicCache: { data: PublicMarketData; at: number } | null = null;
+let publicInFlight: Promise<PublicMarketData> | null = null;
+
+export async function getPublicMarketData(): Promise<PublicMarketData> {
+  if (publicCache && Date.now() - publicCache.at < CACHE_TTL_MS) return publicCache.data;
+  if (publicInFlight) return publicInFlight;
+
+  publicInFlight = (async () => {
+    const base = await getMarketData(); // endeksler + tazelik + seed fallback
+    const list = publicInstruments();
+
+    // Spot kıymetli madenler mevcut modülden gelir (Yahoo'ya tekrar sorulmaz).
+    const spot: Record<string, MarketQuote> = {
+      GRAM_ALTIN: base.indices.gramGold,
+      'GC=F': base.indices.ounceGold,
+      'SI=F': base.indices.ounceSilver,
+    };
+
+    const yahooOnly = Array.from(
+      new Set(list.filter((i) => !spot[i.yahoo]).map((i) => i.yahoo))
+    );
+    const quotes = await Promise.all(yahooOnly.map((y) => fetchYahooQuote(y)));
+    const fetched: Record<string, MarketQuote> = {};
+    yahooOnly.forEach((y, i) => { if (quotes[i]) fetched[y] = quotes[i] as MarketQuote; });
+
+    const all = { ...spot, ...fetched };
+    const instruments: PublicInstrumentQuote[] = list.map((i) => {
+      const q = all[i.yahoo];
+      return {
+        symbol: i.symbol,
+        name: i.name,
+        kind: i.kind,
+        group: i.group,
+        verified: i.verified,
+        price: q && Number.isFinite(q.price) && q.price > 0 ? q.price : null,
+        changePct: q?.changePct ?? null,
+        asOf: q?.asOf ?? null,
+      };
+    });
+
+    const data: PublicMarketData = {
+      source: base.source,
+      timestamp: base.timestamp,
+      dataDate: base.dataDate,
+      indices: base.indices,
+      instruments,
+    };
+    publicCache = { data, at: Date.now() };
+    return data;
+  })();
+
+  try {
+    return await publicInFlight;
+  } finally {
+    publicInFlight = null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* FON HİSSELERİ İÇİN FİYAT BESLEMESİ (P3)                             */
+/*                                                                     */
+/* Fon içeriğindeki hisselerin günlük değişimi, fona etkiyi hesaplamak  */
+/* için gerekir. Yahoo chart (mevcut desen); fiyatı eksik hisse null    */
+/* döner → computeFundPrediction katkısını 0 sayar ve missingTickers'a  */
+/* yazar (uydurma yok).                                                */
+/* ------------------------------------------------------------------ */
+
+const stockCache = new Map<string, { q: MarketQuote | null; at: number }>();
+let stockInFlight: Map<string, Promise<MarketQuote | null>> | null = null;
+
+/** BIST kodu → Yahoo sembolü (ör. OZATD → OZATD.IS). Zaten sonekliyse aynen bırakılır. */
+export function toYahooSymbol(code: string): string {
+  const c = code.trim().toUpperCase();
+  if (!c) return c;
+  return /[.=]/.test(c) ? c : `${c}.IS`;
+}
+
+/**
+ * İstenen BIST kodları için son fiyat + günlük değişim.
+ * Kod doğrulaması: yalnızca A-Z0-9 (2-10) — en çok 60 kod.
+ * Çözülemeyen kod → null (VERİ EKSİK).
+ */
+export async function getStockQuotes(codes: string[]): Promise<Record<string, MarketQuote | null>> {
+  const wanted = Array.from(
+    new Set(
+      codes
+        .map((c) => c.trim().toUpperCase())
+        .filter((c) => /^[A-Z0-9]{2,10}$/.test(c))
+    )
+  ).slice(0, 60);
+
+  const out: Record<string, MarketQuote | null> = {};
+  const missing: string[] = [];
+  for (const c of wanted) {
+    const hit = stockCache.get(c);
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) out[c] = hit.q;
+    else missing.push(c);
+  }
+  if (missing.length === 0) return out;
+
+  if (!stockInFlight) stockInFlight = new Map();
+  const jobs = missing.map(async (c) => {
+    const pending = stockInFlight?.get(c);
+    if (pending) return [c, await pending] as const;
+    const p = fetchYahooQuote(toYahooSymbol(c));
+    stockInFlight?.set(c, p);
+    return [c, await p] as const;
+  });
+
+  const settled = await Promise.all(jobs);
+  for (const [code, q] of settled) {
+    stockCache.set(code, { q, at: Date.now() });
+    out[code] = q;
+  }
+  stockInFlight = null;
+  return out;
 }

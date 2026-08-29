@@ -87,3 +87,40 @@ export interface MarketTicker {
   changePct: number;
   currency: string;
 }
+
+/**
+ * Fon içeriği satırı (fund_holdings tablosu).
+ * source='manual' → kullanıcı override'ı; otomatik sync job'u bu satırları ASLA ezmez.
+ */
+export interface FundHoldingRow {
+  id: string;
+  fund_code: string;
+  ticker: string;
+  company_name: string | null;
+  weight_pct: number;
+  as_of_date: string;
+  source: 'auto' | 'calibration' | 'manual';
+  notes: string | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Veri katmanı hata sözleşmesi (P0)                                   */
+/*                                                                     */
+/* supabase-js hata FIRLATMAZ; { data, error } döndürür. Bu yüzden her  */
+/* okuma/yazma işleminin sonucu açıkça bildirilir ve sessiz yutma       */
+/* imkânsızdır.                                                       */
+/* ------------------------------------------------------------------ */
+
+export type RepoErrorKind = 'setup' | 'network' | 'rls' | 'not_found' | 'unknown';
+
+export interface RepoError {
+  kind: RepoErrorKind;
+  /** Kullanıcıya gösterilebilir kısa sebep (ör. "new row violates row-level security policy"). */
+  message: string;
+  /** Hatanın oluştuğu işlem/tablo (log için). */
+  operation: string;
+}
+
+export type WriteResult = { ok: true } | { ok: false; error: RepoError };
+
+export const isWriteOk = (r: WriteResult): r is { ok: true } => r.ok;

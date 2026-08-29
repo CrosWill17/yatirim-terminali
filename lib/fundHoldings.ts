@@ -285,7 +285,14 @@ export interface HoldingRow {
   notes: string | null;
 }
 
+/** Dışlanan satır sayısı notes alanına bu etiketle yazılır (şema değişikliği yok). */
+export const EXCLUDED_TAG = 'dışlanan';
+
 export function toHoldingRows(parsed: ParsedFundContent): HoldingRow[] {
+  const base = parsed.reportLabel ?? parsed.source;
+  // Düşük etkili (< MIN_IMPACT_PCT) satır sayısı yalnızca parse anında bilinebilir;
+  // UI'da gösterebilmek için notes'a eklenir (uydurma yok: yoksa hiç yazılmaz).
+  const notes = parsed.excludedCount > 0 ? `${base} | ${EXCLUDED_TAG}: ${parsed.excludedCount}` : base;
   return parsed.holdings.map((h) => ({
     fund_code: parsed.fundCode,
     ticker: h.ticker,
@@ -293,8 +300,81 @@ export function toHoldingRows(parsed: ParsedFundContent): HoldingRow[] {
     weight_pct: h.weightPct,
     as_of_date: parsed.asOfDate ?? new Date().toISOString().slice(0, 10),
     source: 'auto' as const,
-    notes: parsed.reportLabel ?? parsed.source,
+    notes,
   }));
+}
+
+/** notes içine gömülü dışlanan satır sayısını geri okur; yoksa null. */
+export function excludedFromNotes(notes: string | null | undefined): number | null {
+  if (!notes) return null;
+  const m = notes.match(new RegExp(`${EXCLUDED_TAG}\\s*:\\s*(\\d+)`));
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/* ---------------------------------------------------------------------------
+ * Fon içeriği özeti (UI — "Fon İçeriği" sekmesi başlık satırı)
+ * --------------------------------------------------------------------------- */
+
+export interface SummaryRow {
+  fund_code: string;
+  ticker: string;
+  company_name: string | null;
+  weight_pct: number;
+  as_of_date: string;
+  source: string;
+  notes: string | null;
+}
+
+export interface FundSummary {
+  fundCode: string;
+  /** En güncel rapor dönemi (satırların max'ı). */
+  asOfDate: string | null;
+  /** Satırların kaynakları (auto / manual karışabilir). */
+  sources: string[];
+  rowCount: number;
+  manualCount: number;
+  /** Ağırlık toplamı (%) — 100'ü aşarsa parse/veri hatası işaretidir. */
+  totalWeightPct: number;
+  /** Düşük etkili satır sayısı (biliniyorsa); null = kayıtta yok. */
+  excludedCount: number | null;
+}
+
+/** fund_holdings satırlarını fon bazında özetler (saf fonksiyon). */
+export function summarizeHoldingRows(rows: SummaryRow[]): FundSummary[] {
+  const byFund = new Map<string, SummaryRow[]>();
+  rows.forEach((r: SummaryRow) => {
+    const list = byFund.get(r.fund_code) ?? [];
+    list.push(r);
+    byFund.set(r.fund_code, list);
+  });
+
+  const fundCodes = Array.from(byFund.keys()).sort((a, b) => a.localeCompare(b));
+  const out: FundSummary[] = [];
+  for (const fundCode of fundCodes) {
+    const list: SummaryRow[] = byFund.get(fundCode) ?? [];
+    const dates = list.map((r: SummaryRow) => r.as_of_date).filter(Boolean).sort();
+    let excluded: number | null = null;
+    for (const r of list) {
+      const e = excludedFromNotes(r.notes);
+      if (e !== null) { excluded = e; break; }
+    }
+    const sources: string[] = [];
+    for (const r of list) if (sources.indexOf(r.source) === -1) sources.push(r.source);
+    out.push({
+      fundCode,
+      asOfDate: dates.length > 0 ? dates[dates.length - 1] : null,
+      sources: sources.sort(),
+      rowCount: list.length,
+      manualCount: list.filter((r: SummaryRow) => r.source === 'manual').length,
+      totalWeightPct: Number(
+        list.reduce((s: number, r: SummaryRow) => s + (Number.isFinite(r.weight_pct) ? r.weight_pct : 0), 0).toFixed(4)
+      ),
+      excludedCount: excluded,
+    });
+  }
+  return out;
 }
 
 /** Parse sonuçlarını doğrulama (Actions job'u: yoruma girmeden durdurur). */
@@ -304,4 +384,16 @@ export function validateParsed(p: ParsedFundContent): { ok: boolean; reason: str
   if (total > 100.0001) return { ok: false, reason: `ağırlık toplamı %${total.toFixed(2)} > 100 (parse hatası)` };
   if (total < 1) return { ok: false, reason: `ağırlık toplamı %${total.toFixed(2)} < 1 (parse hatası)` };
   return { ok: true, reason: null };
+}
+
+/**
+ * GÖSTERİLEBİLİR TAHMİN (v1 kuralı: uydurma yok)
+ *
+ * Fon içeriği kaydı olmayan fonlar (KGM = gümüş katılım, TP2 = para piyasası)
+ * için ağırlıklı tahmin HESAPLANAMAZ → arayüz "—" gösterir.
+ * Fiyatı çözülemeyen hisseler yüzünden hiçbir katkı hesaplanamadıysa da null döner.
+ */
+export function displayablePrediction(p: FundPrediction | null | undefined): FundPrediction | null {
+  if (!p || p.contributions.length === 0) return null;
+  return p;
 }
