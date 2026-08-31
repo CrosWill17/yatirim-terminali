@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   TrendingUp, DollarSign, PieChart, ShieldAlert,
   AlertTriangle, ArrowUpRight, ArrowDownRight,
-  RefreshCw, Activity, Download, Play, Send, PlusCircle, ServerCrash,
+  RefreshCw, Activity, Download, Play, Send, PlusCircle,
 } from 'lucide-react';
 import {
   ResponsiveContainer, PieChart as RPieChart, Pie, Cell, Tooltip as RTooltip,
@@ -82,6 +82,9 @@ export default function Home() {
   const [dbState, setDbState] = useState<DbState>(configured ? 'loading' : 'setup_error');
   const [dbError, setDbError] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  // Oturum token'ı: /api/asset-meta, /api/seed ve /api/market gibi sunucu
+  // uçlarına Authorization: Bearer <token> göndermek için kullanılır.
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
   // P0 — yazma hataları ve son başarılı kayıt zamanı
   const [writeErrors, setWriteErrors] = useState<Record<string, string>>({});
@@ -119,9 +122,13 @@ export default function Home() {
   /* ------------------- Supabase Oturum İzleme --------------------- */
   useEffect(() => {
     if (!configured) { setDbState('setup_error'); return; }
-    supabase.auth.getSession().then(({ data }) => setUserEmail(data.session?.user?.email ?? null));
+    supabase.auth.getSession().then(({ data }) => {
+      setUserEmail(data.session?.user?.email ?? null);
+      setAccessToken(data.session?.access_token ?? null);
+    });
     const { data: sub } = supabase.auth.onAuthStateChange((_e, session) => {
       setUserEmail(session?.user?.email ?? null);
+      setAccessToken(session?.access_token ?? null);
     });
     return () => sub.subscription.unsubscribe();
   }, [configured]);
@@ -153,7 +160,8 @@ export default function Home() {
     if (!configured || isGuest) return; // misafir /api/market'i ÇAĞIRMAZ (P1)
     let cancelled = false;
     const load = () => {
-      fetch('/api/market')
+      if (!accessToken) return;
+      fetch('/api/market', { headers: { Authorization: `Bearer ${accessToken}` } })
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => { if (!cancelled && d && d.indices) setMarket(d); })
         .catch(() => { /* son bilinen veride kalır */ });
@@ -161,7 +169,7 @@ export default function Home() {
     load();
     const timer = setInterval(load, 60_000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [configured, isGuest]);
+  }, [configured, isGuest, accessToken]);
 
   /* ------------------- Yazma takibi (P0) -------------------------- */
   const pendingRef = useRef(0);
@@ -669,6 +677,10 @@ export default function Home() {
     setPredictions([]); setFundHoldings([]); setHoldingPrices({});
     setCashBalance(0); setInitialCapitalState(0);
     setWriteErrors({}); setLastSavedAt(null); setDbError(null);
+    setAssetMeta({});
+    setTrustScore(78.5);
+    setMarket(PUBLIC_SEED_MARKET);
+    setAccessToken(null);
     hydratedRef.current = false;
     setDbState('auth_required');
     setActiveTab('market');
@@ -695,7 +707,7 @@ export default function Home() {
     dbState === 'loading' ? { txt: '⏳ DB…', cls: 'bg-slate-800 text-slate-300 border-slate-700' } :
     dbState === 'auth_required' ? { txt: '🔒 OTURUM GEREKLİ', cls: 'bg-amber-950 text-amber-300 border-amber-800' } :
     dbState === 'db_error' ? { txt: '⚠️ DB ULAŞILAMADI', cls: 'bg-rose-950 text-rose-300 border-rose-700' } :
-    { txt: '⛔ KURULUM HATASI', cls: 'bg-rose-950 text-rose-300 border-rose-700' };
+    { txt: '🔓 PUBLIC MOD', cls: 'bg-slate-900 text-slate-400 border-slate-700' };
 
   const tabs = isGuest ? GUEST_TABS : USER_TABS;
   const visibleTab: TabId = tabs.some((t) => t.id === activeTab) ? activeTab : (isGuest ? 'market' : 'dashboard');
@@ -704,31 +716,6 @@ export default function Home() {
     errorLines.length > 0 ? errorLines.join(' • ')
     : dbState === 'db_error' ? `Veritabanı okunamadı: ${dbError ?? 'bilinmeyen hata'}`
     : null;
-
-  /* ⛔ KURULUM HATASI — "YEREL MOD" kavramı tamamen kaldırıldı (P0) */
-  if (!configured) {
-    return (
-      <div className="min-h-screen bg-[#0a0d14] text-slate-100 flex items-center justify-center p-6">
-        <div className="max-w-2xl w-full bg-rose-950/30 border border-rose-800 rounded-lg p-6 font-mono text-xs space-y-4">
-          <h1 className="text-sm font-bold text-rose-300 flex items-center gap-2">
-            <ServerCrash className="w-4 h-4" /> KURULUM HATASI — VERİTABANI YAPILANDIRILMAMIŞ
-          </h1>
-          <p className="text-rose-200/90">
-            Bu terminal veritabanı olmadan çalışmaz: portföyünüz hiçbir yere kaydedilmez.
-            &quot;Yerel mod&quot; yoktur — aşağıdaki iki değişken tanımlanmadan uygulama portföy ekranını açmaz.
-          </p>
-          <ol className="list-decimal list-inside space-y-1.5 text-slate-300">
-            <li>Vercel → proje → Settings → Environment Variables → Production</li>
-            <li><span className="text-sky-300">NEXT_PUBLIC_SUPABASE_URL</span> = Supabase → Project Settings → API → Project URL</li>
-            <li><span className="text-sky-300">NEXT_PUBLIC_SUPABASE_ANON_KEY</span> = aynı sayfadaki anon/public anahtar (service_role DEĞİL)</li>
-            <li>Yeniden dağıtın — NEXT_PUBLIC_ değişkenleri build sırasında gömülür.</li>
-            <li>Şema: <span className="text-slate-400">supabase/supabase_schema.sql</span> + <span className="text-slate-400">supabase_fund_holdings_migration.sql</span> + <span className="text-slate-400">supabase_twitter_migration.sql</span></li>
-            <li>Yerel geliştirme: <span className="text-slate-400">cp .env.example .env</span> → değerleri doldur → <span className="text-slate-400">npm run dev</span></li>
-          </ol>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col min-h-screen bg-[#0a0d14] text-slate-100">
@@ -837,11 +824,17 @@ export default function Home() {
                 kullanıcıya gösterilir (Supabase RLS). Misafir görünümü salt okunurdur.
               </p>
             </div>
-            <LoginPanel
-              userEmail={null}
-              onSignedIn={() => setActiveTab('dashboard')}
-              onSignedOut={handleSignedOut}
-            />
+            {configured ? (
+              <LoginPanel
+                userEmail={null}
+                onSignedIn={() => setActiveTab('dashboard')}
+                onSignedOut={handleSignedOut}
+              />
+            ) : (
+              <div className="bg-[#111726] border border-slate-800 rounded-lg p-5 font-mono text-xs text-slate-400">
+                Bu ortamda giriş bağlantısı etkin değil. Piyasa verileri herkese açıktır.
+              </div>
+            )}
           </div>
         )}
 
@@ -985,12 +978,17 @@ export default function Home() {
                 <h2 className="text-lg font-bold text-sky-400 font-mono">STRATEJİK ANALİZ MERKEZİ (5 BÖLÜMLÜ DEDEKTİF RAPORU)</h2>
                 <p className="text-xs text-slate-400 mt-1">Canlı piyasa verileri, bilanço rasyoları ve @sevketozhan benchmark entegrasyonu</p>
               </div>
-              <button
-                onClick={() => fetch('/api/market').then((r) => r.json()).then((d) => d && d.indices && setMarket(d))}
-                className="bg-sky-600 hover:bg-sky-500 text-white text-xs font-mono font-bold px-4 py-2 rounded flex items-center gap-2"
-              >
-                <RefreshCw className="w-3.5 h-3.5" /> CANLI ANALİZİ GÜNCELLE
-              </button>
+                  <button
+                    onClick={() => {
+                      if (!accessToken) return;
+                      fetch('/api/market', { headers: { Authorization: `Bearer ${accessToken}` } })
+                        .then((r) => r.json())
+                        .then((d) => { if (d && d.indices) setMarket(d); });
+                    }}
+                    className="bg-sky-600 hover:bg-sky-500 text-white text-xs font-mono font-bold px-4 py-2 rounded flex items-center gap-2"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> CANLI ANALİZİ GÜNCELLE
+                  </button>
             </div>
 
             <div className="space-y-4 font-mono text-xs leading-relaxed">
