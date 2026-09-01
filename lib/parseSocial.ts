@@ -28,9 +28,13 @@ export interface ParsedSocial {
   rawText: string;
 }
 
-/** Bilinen kodlar (portföy + yaygın TEFAS fonları). */
+/** Bilinen kodlar (portföy + @sevketozhan tweetlerindeki yaygın TEFAS fonları). */
 export const KNOWN_SYMBOLS: string[] = [
   'TLY', 'DFI', 'KGM', 'TP2', 'THF', 'GUM', 'YZG', 'MJG', 'DMG', 'GMC',
+  'TMV', 'PUK', 'TTE', 'PHE', 'PBR', 'KHA', 'DOH', 'AFT', 'CPU', 'IJC',
+  'YAY', 'YIT', 'TPKG', 'TPKGY', 'TPKGYF1', 'HRZ', 'SNY', 'KLH',
+  'SDTTR', 'KARCL', 'KTLEV', 'BALSU', 'TATEN', 'OZATD', 'ASELS', 'TERA',
+  'TEHOL', 'BARMA', 'LIDER', 'NETCD', 'AKBNK',
   'BURCE', 'MASFN', 'SARAE', 'EKIM',
 ];
 
@@ -110,3 +114,41 @@ export function parseSocialTweet(text: string): ParsedSocial {
 
   return { fundCode, value, hasPercentSign, predictorHandle: handle, category, rawText };
 }
+
+export interface ParsedSocialAll {
+  fundCode: string;
+  value: number | null;
+  hasPercentSign: boolean;
+}
+
+/**
+ * Bir tweet içinde birden fazla #KOD + sayı olabilir (örn: "#TLY 0,04 #DFI 0,23 #THF -0,34").
+ * Bu fonksiyon tüm eşleşmeleri döner; sayı yoksa value=null (VERİ EKSİK) değil, atlanır
+ * — çünkü "Açıklanmadı" gibi ifadeler veri eksik değil, o fon için tahmin yok demektir.
+ * Tek fon + sayı yoksa çağıran taraf VERİ_EKSİK kararı verebilir.
+ */
+export function parseAllSocialTweets(text: string): ParsedSocialAll[] {
+  const out: ParsedSocialAll[] = [];
+  const seen = new Set<string>(); // fundCode|value dedupe
+  // Global regex: #CODE [: =] NUM [%] — tüm 2-5 harfli kodlar (fon + hisse)
+  const re = /#([A-Za-z]{2,5})\s*[:=]?\s*([+-]?\d{1,4}(?:[.,]\d{1,4})?)\s*(%?)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const fundCode = m[1].toUpperCase();
+    const numStr = m[2];
+    const percent = m[3];
+    // BIST100 gibi 6+ karakter zaten eşleşmez; bilinen portföy dışı BIST hisseleri de dahil olabilir ama sorun değil
+    const sign = numStr[0] === '-' ? '-' : '';
+    const numPart = numStr.replace(/^[+-]/, '');
+    const v = parseFloat(numPart.replace(',', '.'));
+    if (!Number.isFinite(v)) continue;
+    const value = sign === '-' ? -v : v;
+    if (Math.abs(value) > MAX_ABS_PCT) continue;
+    const key = `${fundCode}|${value}|${percent}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ fundCode, value, hasPercentSign: percent === '%' });
+  }
+  return out;
+}
+

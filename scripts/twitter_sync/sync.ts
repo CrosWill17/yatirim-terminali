@@ -26,7 +26,7 @@
 
 import { readFileSync } from 'node:fs';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { parseSocialTweet, KNOWN_SYMBOLS } from '../../lib/parseSocial';
+import { parseSocialTweet, parseAllSocialTweets, KNOWN_SYMBOLS } from '../../lib/parseSocial';
 import { calculateAccuracyScore } from '../../lib/calculations';
 
 /** Rule 1: tek dokunulan tablo. */
@@ -98,38 +98,75 @@ async function main(): Promise<void> {
 
   for (const t of tweets) {
     if (!t || !t.id || !t.text) { skipped++; continue; }
-    const p = parseSocialTweet(t.text);
-    if (!p.fundCode) { skipped++; continue; }                      // finans sinyali yok
-    if (!KNOWN_SYMBOLS.includes(p.fundCode)) { skipped++; continue; } // takibi olmayan kod
+    const all = parseAllSocialTweets(t.text);
+    if (all.length === 0) {
+      // Tekli parse dene (legacy "TLY %0.5" gibi # olmadan)
+      const p = parseSocialTweet(t.text);
+      if (!p.fundCode || !KNOWN_SYMBOLS.includes(p.fundCode)) { skipped++; continue; }
+      if (p.value === null) {
+        // Gerçekten sayı yoksa ve tek fon ise VERİ EKSİK, yoksa atla (Açıklanmadı gibi)
+        const hasAnyNumber = /\d/.test(t.text);
+        if (!hasAnyNumber) { skipped++; continue; }
+        const sourceTweetId = `tw-${t.id}`;
+        tweetSourceIds.push(sourceTweetId);
+        const date = toIsoDate(t.created_at);
+        if (!date) continue;
+        inserts.push({
+          source_tweet_id: sourceTweetId,
+          predictor_handle: p.predictorHandle ?? DEFAULT_HANDLE,
+          fund_code: p.fundCode,
+          prediction_category: p.category,
+          raw_text: t.text,
+          predicted_return_pct: null,
+          prediction_date: date,
+          status: 'VERI_EKSİK',
+        });
+        continue;
+      }
+      // Tek tahmin
+      const sourceTweetId = `tw-${t.id}`;
+      tweetSourceIds.push(sourceTweetId);
+      const date = toIsoDate(t.created_at);
+      if (!date) continue;
+      const base = {
+        source_tweet_id: sourceTweetId,
+        predictor_handle: p.predictorHandle ?? DEFAULT_HANDLE,
+        fund_code: p.fundCode,
+        prediction_category: p.category,
+        raw_text: t.text,
+      };
+      if (!p.hasPercentSign) {
+        inserts.push({ ...base, predicted_return_pct: p.value, prediction_date: date, status: 'BEKLIYOR' });
+      } else {
+        bCandidates.push({ fund: p.fundCode, date, actual: p.value, sourceTweetId });
+      }
+      continue;
+    }
 
-    const sourceTweetId = `tw-${t.id}`;
-    tweetSourceIds.push(sourceTweetId);
+    // Çoklu tahmin (örn: "#TLY 0,04 #DFI 0,23 #THF -0,34")
     const date = toIsoDate(t.created_at);
-    const base = {
-      source_tweet_id: sourceTweetId,
-      predictor_handle: p.predictorHandle ?? DEFAULT_HANDLE,
-      fund_code: p.fundCode,
-      prediction_category: p.category,
-      raw_text: t.text, // Rule 3: ham metin aynen
-    };
-
-    if (!date) {
-      // Tarih çözülemedi: VERİ EKSİK (DATE NOT NULL → bugün; değer uydurulmaz)
-      inserts.push({ ...base, predicted_return_pct: null, prediction_date: new Date().toISOString().slice(0, 10), status: 'VERI_EKSİK' });
-      continue;
+    if (!date) { skipped++; continue; }
+    const baseHandle = parseSocialTweet(t.text).predictorHandle ?? DEFAULT_HANDLE;
+    const baseCat = parseSocialTweet(t.text).category;
+    for (let idx = 0; idx < all.length; idx++) {
+      const a = all[idx];
+      const sourceTweetId = `tw-${t.id}-${a.fundCode.toLowerCase()}`; // her fon için ayrı id (unique)
+      tweetSourceIds.push(sourceTweetId);
+      if (!a.hasPercentSign) {
+        inserts.push({
+          source_tweet_id: sourceTweetId,
+          predictor_handle: baseHandle,
+          fund_code: a.fundCode,
+          prediction_category: baseCat,
+          raw_text: t.text,
+          predicted_return_pct: a.value,
+          prediction_date: date,
+          status: 'BEKLIYOR',
+        });
+      } else {
+        bCandidates.push({ fund: a.fundCode, date, actual: a.value!, sourceTweetId });
+      }
     }
-    if (p.value === null) {
-      // Rule 4: sayı yok → veri eksik
-      inserts.push({ ...base, predicted_return_pct: null, prediction_date: date, status: 'VERI_EKSİK' });
-      continue;
-    }
-    if (!p.hasPercentSign) {
-      // FORMAT A → tahmin
-      inserts.push({ ...base, predicted_return_pct: p.value, prediction_date: date, status: 'BEKLIYOR' });
-      continue;
-    }
-    // FORMAT B → gerçekleşen (eşleştirme DB durumuyla 2. turda yapılır)
-    bCandidates.push({ fund: p.fundCode, date, actual: p.value, sourceTweetId });
   }
 
   // ---------------- 2) DB: dedupe + açık tahmin havuzu ----------------
