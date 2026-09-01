@@ -28,10 +28,14 @@ const fundTab = (props: Partial<Parameters<typeof FundContentTab>[0]> = {}) =>
     createElement(FundContentTab, {
       rows,
       prices: { OZATD: { price: 500, changePct: 2 }, FIYATYOK: null },
+      predictions: [],
+      proposals: [],
       masked: false,
       canWrite: true,
       onUpsert: noop,
       onDelete: noop,
+      onApproveProposal: noop as any,
+      onRejectProposal: noop as any,
       ...props,
     })
   );
@@ -155,5 +159,31 @@ describe('P3 — FundContentTab', () => {
     const html = fundTab({ rows: [] });
     expect(html).toContain('Fon içeriği kaydı yok');
     expect(html).toContain('supabase_fund_holdings_migration.sql');
+  });
+
+  it('Twitter foto OCR önerisi onay kutusu (v3.4)', () => {
+    const html = fundTab({
+      proposals: [
+        {
+          id: 'prop1',
+          fund_code: 'DFI',
+          ticker: 'IEYHO',
+          weight_pct: 51.0,
+          prev_weight_pct: 48.02,
+          source_tweet_id: 'tw-123',
+          predictor_handle: '@sevketozhan',
+          raw_text: 'DFI tahmini',
+          detected_at: new Date().toISOString(),
+          status: 'pending',
+        } as any,
+      ],
+    });
+    expect(html).toContain('TWITTER FOTO OCR');
+    expect(html).toContain('#IEYHO');
+    expect(html).toContain('51'); // formatPublic 51.0 → "51" (max fraction)
+    expect(html).toContain('48,02'); // prev weight with decimals
+    expect(html).toContain('ONAYLA');
+    expect(html).toContain('REDDET');
+    expect(html).toContain('twitterdan @sevketozhan');
   });
 });

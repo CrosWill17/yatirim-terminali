@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { Layers, Pencil, PlusCircle, Save, Trash2, MessageCircle, TrendingUp } from 'lucide-react';
+import { Layers, Pencil, PlusCircle, Save, Trash2, MessageCircle, TrendingUp, CheckCircle, XCircle, Camera } from 'lucide-react';
 import type { FundHoldingRow, SocialPrediction } from '@/lib/types';
 import type { HoldingPrice, FundPrediction } from '@/lib/fundHoldings';
 import { computeFundPrediction, summarizeHoldingRows } from '@/lib/fundHoldings';
-import { formatPublic, formatSensitive } from '@/lib/mask';
+import { formatPublic } from '@/lib/mask';
+import type { FundHoldingProposal } from '@/lib/repo';
 
 export interface FundHoldingDraft {
   fund_code: string;
@@ -20,11 +21,14 @@ interface Props {
   rows: FundHoldingRow[];
   prices: Record<string, HoldingPrice | null>;
   predictions?: SocialPrediction[];
+  proposals?: FundHoldingProposal[];
   masked: boolean;
   /** Veritabanı hazır değilse form devre dışı (yazma denemesi yapılmaz). */
   canWrite: boolean;
   onUpsert: (draft: FundHoldingDraft) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onApproveProposal?: (p: FundHoldingProposal) => Promise<void>;
+  onRejectProposal?: (id: string) => Promise<void>;
 }
 
 // Portföy kodu İÇERMEZ: bu bileşen herkese açık bundle'da yer alır.
@@ -38,17 +42,22 @@ const EMPTY_FORM = {
 };
 
 /**
- * P3 — FON İÇERİĞİ SEKMESİ
+ * P3 — FON İÇERİĞİ SEKMESİ + v3.4 OCR onay kutusu
  *
  * Fon başına tablo: hisse / resmî ad / ağırlık % / hissenin günlük değişim % /
  * fona etki (pp). Üstte as_of_date + source + dışlanan düşük etkili satır sayısı.
  * Manuel override formu source='manual' yazar; otomatik sync job'u bu satırları
  * ASLA ezmez (koruma scripts/fund_holdings/sync.ts içinde).
  *
- * Ağırlık % ve değişim % KAMU verisidir (KAP raporu) → maskelenmez.
- * Fiyatı eksik hisse: katkı 0, tabloda "VERİ EKSİK" (uydurma yok).
+ * v3.4: @sevketozhan günlük etki fotoğrafındaki tahmini ağırlıklar OCR ile
+ * fund_holding_proposals tablosuna pending olarak yazılır. Burada onay kutucuğu
+ * gösterilir: "twitterdan @sevketozhan hesabının günlük etki paylaşımından
+ * #TICKER ağırlığı %X olarak değişti bilgisi çekildi onaylarsanız hisse
+ * içeriği değiştirilecek" [ONAYLA][REDDET]. Onay → fund_holdings upsert
+ * source=manual + notes=twitter-photo, proposal approved. Red → rejected.
+ * Otomatik fund_holdings yazımı YOK — sadece manuel onay ile.
  */
-export default function FundContentTab({ rows, prices, predictions = [], masked, canWrite, onUpsert, onDelete }: Props) {
+export default function FundContentTab({ rows, prices, predictions = [], proposals = [], masked, canWrite, onUpsert, onDelete, onApproveProposal, onRejectProposal }: Props) {
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
@@ -66,6 +75,18 @@ export default function FundContentTab({ rows, prices, predictions = [], masked,
     map.forEach((list) => list.sort((a, b) => b.weight_pct - a.weight_pct));
     return map;
   }, [rows]);
+
+  const proposalsByFund = useMemo(() => {
+    const map = new Map<string, FundHoldingProposal[]>();
+    for (const p of proposals) {
+      const code = p.fund_code.toUpperCase();
+      const list = map.get(code) ?? [];
+      list.push(p);
+      map.set(code, list);
+    }
+    map.forEach((list) => list.sort((a, b) => b.weight_pct - a.weight_pct));
+    return map;
+  }, [proposals]);
 
   const predictionsMap = useMemo(() => {
     const out: Record<string, FundPrediction> = {};
@@ -141,12 +162,63 @@ export default function FundContentTab({ rows, prices, predictions = [], masked,
           <p className="text-[10px] text-slate-500 mt-1">
             Kaynak: aylık KAP portföy dağılım raporları (otomatik job) + manuel override.
             Fona etkisi %0,01&apos;in altındaki hisseler hesaplamaya alınmaz.
+            Twitter foto OCR önerileri onay kutusu ile manuel yazılır.
           </p>
         </div>
         <span className="text-[10px] text-slate-400 bg-slate-900 border border-slate-800 px-2 py-1 rounded">
-          {rows.length} satır • {summaries.length} fon
+          {rows.length} satır • {summaries.length} fon • {proposals.length} öneri
         </span>
       </div>
+
+      {/* v3.4 — Onay bekleyen Twitter foto OCR önerileri (global) */}
+      {proposals.length > 0 && (
+        <div className="bg-amber-950/20 border border-amber-800 rounded-lg p-4 space-y-3">
+          <h3 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+            <Camera className="w-4 h-4" /> TWITTER FOTO OCR — ONAY BEKLEYEN ÖNERİLER ({proposals.length})
+          </h3>
+          <p className="text-[10px] text-amber-200/70">
+            @sevketozhan günlük etki fotoğrafından tahmini ağırlıklar OCR ile çekildi. Onaylarsanız fund_holdings
+            tablosuna source=manual olarak yazılacak (otomatik yazım YOK, resmi KAP raporu öncelikli).
+          </p>
+          <div className="space-y-2 max-h-72 overflow-y-auto">
+            {proposals.map((pr) => (
+              <div key={pr.id} className="bg-slate-900 border border-amber-900/50 rounded p-3 flex items-center justify-between gap-3">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-sky-300">{pr.fund_code}</span>
+                    <span className="font-bold text-amber-300">#{pr.ticker}</span>
+                    <span className="text-slate-200">ağırlığı %{formatPublic(pr.weight_pct, { digits: 2 })} olarak değişti</span>
+                    {pr.prev_weight_pct != null && (
+                      <span className="text-slate-400">(önceki %{formatPublic(pr.prev_weight_pct, { digits: 2 })} → %{formatPublic(pr.weight_pct, { digits: 2 })})</span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-1">
+                    twitterdan {pr.predictor_handle ?? '@sevketozhan'} hesabının günlük etki paylaşımından #{pr.ticker} ağırlığı %{formatPublic(pr.weight_pct, { digits: 2 })} olarak değişti bilgisi çekildi
+                    {pr.source_tweet_id ? ` (kaynak: ${pr.source_tweet_id})` : ''} — onaylarsanız hisse içeriği değiştirilecek
+                  </div>
+                  {pr.raw_text && <div className="text-[9px] text-slate-500 mt-1 truncate">{pr.raw_text.slice(0, 200)}</div>}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => onApproveProposal?.(pr)}
+                    disabled={!canWrite}
+                    className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-3 py-1.5 rounded flex items-center gap-1"
+                  >
+                    <CheckCircle className="w-3.5 h-3.5" /> ONAYLA
+                  </button>
+                  <button
+                    onClick={() => onRejectProposal?.(pr.id)}
+                    disabled={!canWrite}
+                    className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 font-bold px-3 py-1.5 rounded flex items-center gap-1"
+                  >
+                    <XCircle className="w-3.5 h-3.5" /> REDDET
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {rows.length === 0 && (
         <div className="bg-[#111726] border border-slate-800 rounded-lg p-6 text-slate-400">
@@ -164,6 +236,7 @@ export default function FundContentTab({ rows, prices, predictions = [], masked,
         const validSocial = socialList.filter((p) => p.predicted_return_pct != null && p.status !== 'VERI_EKSİK');
         const avgSocial = validSocial.length > 0 ? validSocial.reduce((sum, p) => sum + (p.predicted_return_pct as number), 0) / validSocial.length : null;
         const blended = pred && pred.predictedPct != null && avgSocial != null ? pred.predictedPct * 0.6 + avgSocial * 0.4 : null;
+        const fundProposals = proposalsByFund.get(s.fundCode) ?? [];
         return (
           <div key={s.fundCode} className="bg-[#111726] border border-slate-800 rounded-lg overflow-hidden">
             <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
@@ -184,6 +257,9 @@ export default function FundContentTab({ rows, prices, predictions = [], masked,
                   </span>
                   {s.manualCount > 0 && (
                     <span className="text-amber-300">✍️ {s.manualCount} manuel satır (sync ezmez)</span>
+                  )}
+                  {fundProposals.length > 0 && (
+                    <span className="text-amber-300">📷 {fundProposals.length} OCR öneri bekliyor</span>
                   )}
                 </div>
               </div>
@@ -229,6 +305,25 @@ export default function FundContentTab({ rows, prices, predictions = [], masked,
                 )}
               </div>
             </div>
+
+            {/* Fon bazında OCR önerileri (inline) */}
+            {fundProposals.length > 0 && (
+              <div className="bg-amber-950/10 border-b border-amber-900/30 p-3 space-y-2">
+                <div className="text-[11px] font-bold text-amber-300 flex items-center gap-1"><Camera className="w-3 h-3" /> {s.fundCode} için {fundProposals.length} OCR önerisi — onay bekliyor</div>
+                {fundProposals.map((pr) => (
+                  <div key={pr.id} className="flex items-center justify-between gap-2 bg-slate-900/60 border border-amber-900/20 rounded px-3 py-2">
+                    <span className="text-[11px] text-slate-200">
+                      twitterdan {pr.predictor_handle ?? '@sevketozhan'} hesabının günlük etki paylaşımından #{pr.ticker} ağırlığı %{formatPublic(pr.weight_pct, { digits: 2 })} olarak değişti bilgisi çekildi onaylarsanız hisse içeriği değiştirilecek
+                      {pr.prev_weight_pct != null ? ` (önceki %${formatPublic(pr.prev_weight_pct, { digits: 2 })} → %${formatPublic(pr.weight_pct, { digits: 2 })})` : ''}
+                    </span>
+                    <span className="flex gap-1 shrink-0">
+                      <button onClick={() => onApproveProposal?.(pr)} disabled={!canWrite} className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-2 py-1 rounded text-[10px] flex items-center gap-1"><CheckCircle className="w-3 h-3" /> ONAYLA</button>
+                      <button onClick={() => onRejectProposal?.(pr.id)} disabled={!canWrite} className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 font-bold px-2 py-1 rounded text-[10px] flex items-center gap-1"><XCircle className="w-3 h-3" /> REDDET</button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
@@ -335,6 +430,7 @@ export default function FundContentTab({ rows, prices, predictions = [], masked,
         <p className="text-[10px] text-slate-500">
           Kaydedilen satır <span className="text-amber-300">source=&apos;manual&apos;</span> olur; otomatik
           fund-holdings-sync işi manuel satırları asla ezmez ve silmez. Ağırlık toplamı 100&apos;ü aşmamalı.
+          Twitter foto OCR önerileri yalnızca onay ile yazılır — otomatik yazım yok.
         </p>
       </div>
     </div>

@@ -102,6 +102,7 @@ export interface DbBundle {
   cashMovements: CashMovement[];
   predictions: SocialPrediction[];
   fundHoldings: FundHoldingRow[];
+  proposals: FundHoldingProposal[];
   cashBalance: number | null;
   initialCapital: number | null;
 }
@@ -117,13 +118,14 @@ export type LoadResult =
 export async function loadAll(): Promise<LoadResult> {
   if (!enabled()) return { ok: false, error: setupError('loadAll') };
   try {
-    const [posRes, decRes, txnRes, cashRes, predRes, fundRes, balRes, setRes] = await Promise.all([
+    const [posRes, decRes, txnRes, cashRes, predRes, fundRes, propRes, balRes, setRes] = await Promise.all([
       supabase.from('portfolio_positions').select('*').order('symbol'),
       supabase.from('execution_decisions').select('*').order('created_at'),
       supabase.from('transactions').select('*').order('created_at', { ascending: false }),
       supabase.from('cash_ledger').select('*').order('created_at', { ascending: false }),
       supabase.from('social_predictions').select('*').order('prediction_date', { ascending: false }),
       supabase.from('fund_holdings').select('*').order('fund_code').order('weight_pct', { ascending: false }),
+      supabase.from('fund_holding_proposals').select('*').eq('status', 'pending').order('detected_at', { ascending: false }),
       supabase.from('cash_ledger').select('balance_after').order('created_at', { ascending: false }).limit(1),
       supabase.from('app_settings').select('key, value').eq('key', 'initial_capital'),
     ]);
@@ -160,6 +162,25 @@ export async function loadAll(): Promise<LoadResult> {
         as_of_date: String(r.as_of_date ?? '').slice(0, 10),
         source: r.source === 'manual' || r.source === 'calibration' ? r.source : 'auto',
         notes: r.notes ?? null,
+      }));
+    }
+
+    // fund_holding_proposals: v3.4 migration henüz çalıştırılmamış olabilir → sessiz.
+    let proposals: FundHoldingProposal[] = [];
+    if (propRes.error) {
+      console.warn(`[repo] fund_holding_proposals okunamadı: ${propRes.error.message} — supabase_fund_proposals_migration.sql çalıştırıldı mı?`);
+    } else {
+      proposals = ((propRes.data as any[]) ?? []).map((r) => ({
+        id: r.id,
+        fund_code: r.fund_code,
+        ticker: r.ticker,
+        weight_pct: Number(r.weight_pct),
+        prev_weight_pct: r.prev_weight_pct != null ? Number(r.prev_weight_pct) : null,
+        source_tweet_id: r.source_tweet_id ?? null,
+        predictor_handle: r.predictor_handle ?? null,
+        raw_text: r.raw_text ?? null,
+        detected_at: r.detected_at,
+        status: r.status,
       }));
     }
 
@@ -232,7 +253,7 @@ export async function loadAll(): Promise<LoadResult> {
 
     return {
       ok: true,
-      bundle: { positions, decisions, transactions, cashMovements, predictions, fundHoldings, cashBalance, initialCapital },
+      bundle: { positions, decisions, transactions, cashMovements, predictions, fundHoldings, proposals, cashBalance, initialCapital },
     };
   } catch (err) {
     const error = classifySupabaseError('loadAll', {
@@ -418,3 +439,53 @@ export function deleteFundHolding(id: string): Promise<WriteResult> {
     supabase.from('fund_holdings').delete().eq('id', id)
   );
 }
+
+/* --------------------- Fon içeriği önerileri (Twitter foto OCR + onay) ---------- */
+
+export interface FundHoldingProposal {
+  id: string;
+  fund_code: string;
+  ticker: string;
+  weight_pct: number;
+  prev_weight_pct?: number | null;
+  source_tweet_id?: string | null;
+  predictor_handle?: string | null;
+  raw_text?: string | null;
+  detected_at?: string;
+  status: 'pending' | 'approved' | 'rejected';
+}
+
+export async function loadProposals(): Promise<FundHoldingProposal[]> {
+  if (!enabled()) return [];
+  try {
+    const { data, error } = await supabase.from('fund_holding_proposals').select('*').eq('status', 'pending').order('detected_at', { ascending: false });
+    if (error || !data) return [];
+    return (data as any[]).map((r) => ({
+      id: r.id,
+      fund_code: r.fund_code,
+      ticker: r.ticker,
+      weight_pct: Number(r.weight_pct),
+      prev_weight_pct: r.prev_weight_pct != null ? Number(r.prev_weight_pct) : null,
+      source_tweet_id: r.source_tweet_id ?? null,
+      predictor_handle: r.predictor_handle ?? null,
+      raw_text: r.raw_text ?? null,
+      detected_at: r.detected_at,
+      status: r.status,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function approveProposal(id: string): Promise<WriteResult> {
+  return write('approveProposal', () =>
+    supabase.from('fund_holding_proposals').update({ status: 'approved' }).eq('id', id)
+  );
+}
+
+export function rejectProposal(id: string): Promise<WriteResult> {
+  return write('rejectProposal', () =>
+    supabase.from('fund_holding_proposals').update({ status: 'rejected' }).eq('id', id)
+  );
+}
+
