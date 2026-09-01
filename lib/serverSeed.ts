@@ -30,6 +30,7 @@ export const ASSET_META: Record<string, { name: string; type: Position['asset_ty
   EKIM: { name: 'Ekim Turizm Ticaret ve Sanayi A.Ş.', type: 'BIST_HISSE' },
   TLY: { name: 'Tera Portföy Birinci Serbest Fon', type: 'TEFAS_FON' },
   DFI: { name: 'Atlas Portföy Serbest Fon', type: 'TEFAS_FON' },
+  THF: { name: 'Tera Portföy Hisse Senedi (TL) Fonu (Hisse Senedi Yoğun Fon)', type: 'TEFAS_FON' },
   KGM: { name: 'Kuveyt Türk Portföy Gümüş Katılım Fon Sepeti', type: 'TEFAS_FON' },
   TP2: { name: 'Tera Portföy Para Piyasası (TL) Fonu', type: 'PPF' },
 };

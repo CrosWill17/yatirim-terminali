@@ -132,6 +132,8 @@ def main() -> None:
         json.dump(out, f, ensure_ascii=False, indent=2)
 
     # stdout: yalnızca sayı ve dosya (secret YOK)
+    with_media = sum(1 for x in out if x.get("media_urls"))
+    print(f"OK: {len(out)} tweet → data/tweets.json ({with_media} foto)")
     if not out:
         first = raw_tweets[0] if raw_tweets else None
         first_keys = list(first.keys()) if isinstance(first, dict) else (type(first).__name__ if first is not None else "veri yok")

@@ -84,6 +84,7 @@ export const SEED_MARKET: MarketData = {
     EKIM: { price: 18.82, changePct: -3.34, asOf: '25.08.2026 kapanış' },
     TLY: { price: 8948.48, changePct: 0.46, asOf: '25.08.2026' },
     DFI: { price: 5.6392, changePct: 0.62, asOf: '24.08.2026' },
+    THF: { price: 2.724426, changePct: -0.35, asOf: '31.08.2026' },
     KGM: { price: 3.1474, changePct: -0.07, asOf: '24.08.2026' },
     TP2: { price: 2.1818, changePct: 0.13, asOf: '24.08.2026' },
   },
@@ -306,7 +307,7 @@ async function fetchLiveQuotes(): Promise<LiveQuotes> {
     bng,
     usdtry, ounceGold, ounceSilver,
     burce, masfn, sarae, ekim,
-    tly, dfi, kgm, tp2,
+    tly, dfi, thf, kgm, tp2,
   ] = await Promise.all([
     fetchBorsaningundemiTickers(),
     fetchYahooQuote('USDTRY=X'),
@@ -318,6 +319,7 @@ async function fetchLiveQuotes(): Promise<LiveQuotes> {
     fetchYahooQuote('EKIM.IS'),
     fetchFonalyQuote('TLY'),
     fetchFonalyQuote('DFI'),
+    fetchFonalyQuote('THF'),
     fetchFonalyQuote('KGM'),
     fetchFonalyQuote('TP2'),
   ]);
@@ -340,7 +342,7 @@ async function fetchLiveQuotes(): Promise<LiveQuotes> {
   const positions: Record<string, MarketQuote> = {};
   const map: [string, MarketQuote | null][] = [
     ['BURCE', burce], ['MASFN', masfn], ['SARAE', sarae], ['EKIM', ekim],
-    ['TLY', tly], ['DFI', dfi], ['KGM', kgm], ['TP2', tp2],
+    ['TLY', tly], ['DFI', dfi], ['THF', thf], ['KGM', kgm], ['TP2', tp2],
   ];
   for (const [code, q] of map) if (q) positions[code] = q;
 

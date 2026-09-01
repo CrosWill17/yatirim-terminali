@@ -362,11 +362,13 @@ export default function Home() {
   const researchingRef = React.useRef<Set<string>>(new Set());
   useEffect(() => {
     if (isGuest || positions.length === 0) return;
-    // TEFAS fonu olup fund_holdings'de hiç kaydı olmayan fonlar
+    // TEFAS fonu olup fund_holdings'de hiç kaydı olmayan fonlar — THF dahil
+    // asset_type kontrolü + bilinen fon kodları (TLY, DFI, THF, GUM vb.) için fallback
+    const KNOWN_FUND_CODES = ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2','KGM','TP2'];
     const fundCodesInPortfolio = Array.from(
       new Set(
         positions
-          .filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF')
+          .filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF' || KNOWN_FUND_CODES.includes(p.symbol.toUpperCase()))
           .map((p) => p.symbol.toUpperCase())
       )
     );
@@ -1236,13 +1238,14 @@ export default function Home() {
           </div>
         )}
 
-        {/* 4. 🧬 FON İÇERİĞİ (P3 + Twitter beslemeli + OCR onay kutusu) */}
+        {/* 4. 🧬 FON İÇERİĞİ (P3 + Twitter beslemeli + OCR onay kutusu + THF otomatik) */}
         {!isGuest && visibleTab === 'funds' && (
           <FundContentTab
             rows={fundHoldings}
             prices={holdingPrices}
             predictions={predictions}
             proposals={proposals}
+            portfolioFundCodes={Array.from(new Set(positions.filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF' || ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2'].includes(p.symbol.toUpperCase())).map((p) => p.symbol.toUpperCase())))}
             masked={masked}
             canWrite={dbState === 'connected'}
             onUpsert={handleUpsertHolding}

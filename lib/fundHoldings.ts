@@ -65,12 +65,14 @@ export interface FundSourceConfig {
   url: string | null;
 }
 
-/** Portföydeki 4 fon ve veri kaynakları. */
+/** Portföydeki fonlar ve veri kaynakları (dinamik genişletme: THF eklendi). */
 export const FUND_SOURCES: FundSourceConfig[] = [
   { code: 'TLY', name: 'TERA PORTFÖY BİRİNCİ SERBEST FON', kind: 'rotaborsa',
     url: 'https://rotaborsa.com/tera-portfoy-birinci-serbest-fon-tly-guncel-hisse-dagilimi/' },
   { code: 'DFI', name: 'ATLAS PORTFÖY SERBEST FON', kind: 'fintables',
     url: 'https://fintables.com/fonlar/DFI' },
+  { code: 'THF', name: 'TERA PORTFÖY HİSSE SENEDİ (TL) FONU (HİSSE SENEDİ YOĞUN FON)', kind: 'fintables',
+    url: 'https://fintables.com/fonlar/THF' },
   // KGM = gümüş katılım fonu (hisse yok → v2: gümüş proxy'si); TP2 = para piyasası (hisse yok)
   { code: 'KGM', name: 'KUVEYT TÜRK PORTFÖY GÜMÜŞ KATILIM FON SEPETİ FONU', kind: 'gold-proxy', url: null },
   { code: 'TP2', name: 'TERA PORTFÖY PARA PİYASASI (TL) FONU', kind: 'none', url: null },

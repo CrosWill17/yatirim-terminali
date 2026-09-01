@@ -22,6 +22,7 @@ interface Props {
   prices: Record<string, HoldingPrice | null>;
   predictions?: SocialPrediction[];
   proposals?: FundHoldingProposal[];
+  portfolioFundCodes?: string[];
   masked: boolean;
   /** Veritabanı hazır değilse form devre dışı (yazma denemesi yapılmaz). */
   canWrite: boolean;
@@ -57,7 +58,7 @@ const EMPTY_FORM = {
  * source=manual + notes=twitter-photo, proposal approved. Red → rejected.
  * Otomatik fund_holdings yazımı YOK — sadece manuel onay ile.
  */
-export default function FundContentTab({ rows, prices, predictions = [], proposals = [], masked, canWrite, onUpsert, onDelete, onApproveProposal, onRejectProposal }: Props) {
+export default function FundContentTab({ rows, prices, predictions = [], proposals = [], portfolioFundCodes = [], masked, canWrite, onUpsert, onDelete, onApproveProposal, onRejectProposal }: Props) {
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
@@ -228,6 +229,24 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
           Tablo yoksa önce <span className="text-slate-300">supabase/supabase_fund_holdings_migration.sql</span> çalıştırılmalı.
         </div>
       )}
+
+      {/* Portföyde olup içeriği henüz çekilmemiş fonlar (THF dahil) — otomatik araştırma bekliyor */}
+      {portfolioFundCodes.length > 0 && (() => {
+        const existing = new Set(rows.map((r) => r.fund_code.toUpperCase()));
+        const missing = portfolioFundCodes.filter((c) => !existing.has(c.toUpperCase()) && !['KGM','TP2'].includes(c.toUpperCase()));
+        if (missing.length === 0) return null;
+        return (
+          <div className="bg-sky-950/20 border border-sky-800 rounded-lg p-4 space-y-2">
+            <h3 className="text-sm font-bold text-sky-300">PORTFÖYDEKİ FONLAR — İÇERİK OTOMATİK ARAŞTIRILIYOR ({missing.length})</h3>
+            <p className="text-[10px] text-slate-400">Bu fonlar portföyünüzde var ama fund_holdings tablosunda kaydı yok. Otomatik araştırma fintables üzerinden çekiyor (THF dahil). Birkaç saniye içinde tabloya eklenecek.</p>
+            <div className="flex flex-wrap gap-2">
+              {missing.map((code) => (
+                <span key={code} className="px-2 py-1 rounded bg-slate-900 border border-sky-800 text-sky-300 text-[11px] font-bold">{code} — araştırılıyor...</span>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {summaries.map((s) => {
         const list = byFund.get(s.fundCode) ?? [];
