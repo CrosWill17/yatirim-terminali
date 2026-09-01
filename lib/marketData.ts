@@ -192,7 +192,42 @@ async function fetchBorsaningundemiTickers(): Promise<{ xu100: MarketQuote | nul
   }
 }
 
-/** fonaly.com fon sayfası: "güncel fon fiyatı X ₺, günlük getiri +Y%" meta betiği. */
+/** fonaly.com fon sayfası — 2026-09 güncel yapısı:
+ *  Title: "TLY Fonu — 9.200,361325 ₺ (+0,60%) | Fonaly"
+ *  Body:  "Birim Pay Fiyatı\n\n9200.36132\n\n+0,60% ▲"
+ *  Eski meta "güncel fon fiyatı X ₺, günlük getiri Y%" bazı sayfalarda hâlâ var.
+ *  Parser her iki formatı da (TR 9.200,36 ve dot 9200.36) destekler.
+ */
+function parseFonalyPriceRaw(s: string): number | null {
+  let str = s.trim().replace(/\u00a0/g, ' ');
+  str = str.replace(/[^\d.,\-]/g, '').trim();
+  if (!str) return null;
+  if (str.includes(',') && str.includes('.')) {
+    const lastComma = str.lastIndexOf(',');
+    const lastDot = str.lastIndexOf('.');
+    if (lastComma > lastDot) {
+      str = str.replace(/\./g, '').replace(',', '.');
+    } else {
+      str = str.replace(/,/g, '');
+    }
+  } else if (str.includes(',')) {
+    str = str.replace(',', '.');
+  }
+  const n = parseFloat(str);
+  if (!Number.isFinite(n) || n <= 0.1 || n >= 1_000_000) return null;
+  return n;
+}
+
+function parseFonalyChangeRaw(s: string): number | null {
+  let str = s.trim().replace(/\u00a0/g, ' ').replace(/\u2212/g, '-').replace(/[\u2013\u2014]/g, '-');
+  str = str.replace(/[^\d.,+\-]/g, '').trim();
+  if (!str) return null;
+  str = str.replace(',', '.');
+  const n = parseFloat(str);
+  if (!Number.isFinite(n) || Math.abs(n) >= 30) return null;
+  return n;
+}
+
 async function fetchFonalyQuote(code: string): Promise<MarketQuote | null> {
   try {
     const res = await fetchWithTimeout(`https://www.fonaly.com/funds/${code}`);
@@ -202,56 +237,58 @@ async function fetchFonalyQuote(code: string): Promise<MarketQuote | null> {
     let price: number | null = null;
     let changePct: number | null = null;
 
-    // Öncelik: meta description ("güncel fon fiyatı 7.730,551937 ₺, günlük getiri +1.56%")
-    const priceMatch = html.match(/güncel\s+fon\s+fiyatı\s*([\d.]+(?:,\d+)?)/i);
-    const changeMatch = html.match(/günlük\s+getiri\s*([+-]?[\d.,]+)\s*%/i);
-    if (priceMatch) price = parseFloat(priceMatch[1].replace(/\./g, '').replace(',', '.'));
-    if (changeMatch) changePct = parseFloat(changeMatch[1].replace(',', '.'));
+    // 1) Meta: "güncel fon fiyatı 7.730,551937 ₺, günlük getiri +1,56%"
+    const metaPriceM = html.match(/güncel\s+fon\s+fiyatı\s*([\d.,]+)/i);
+    const metaChangeM = html.match(/günlük\s+getiri\s*([+\-−\u2212]?[\d.,]+)\s*%/i);
+    if (metaPriceM) price = parseFonalyPriceRaw(metaPriceM[1]);
+    if (metaChangeM) changePct = parseFonalyChangeRaw(metaChangeM[1]);
 
-    // Yedek: sayfa gövdesindeki "Birim Pay Fiyatı" bloğu
+    // 2) <title> tag: "TLY Fonu — 9.200,361325 ₺ (+0,60%)"
+    if (price === null || changePct === null) {
+      const titleTag = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (titleTag) {
+        const t = titleTag[1];
+        const both = t.match(/(\d[\d.,]*)\s*₺[^0-9+\-−]*\(?\s*([+\-−\u2212]?[\d.,]+)\s*%\s*\)?/);
+        if (both) {
+          if (price === null) price = parseFonalyPriceRaw(both[1]);
+          if (changePct === null) changePct = parseFonalyChangeRaw(both[2]);
+        } else {
+          if (price === null) {
+            const mp = t.match(/(\d[\d.,]+)\s*₺/);
+            if (mp) price = parseFonalyPriceRaw(mp[1]);
+          }
+          if (changePct === null) {
+            const mc = t.match(/([+\-−\u2212]?[\d.,]+)\s*%/);
+            if (mc) changePct = parseFonalyChangeRaw(mc[1]);
+          }
+        }
+      }
+    }
+
+    // 3) Body: "Birim Pay Fiyatı" bloğu
     if (price === null) {
-      const bodyMatch = html.match(/Birim\s+Pay\s+Fiyatı[\s\S]{0,300}?([\d.]{2,}(?:[.,]\d+)?)/i);
-      if (bodyMatch) price = parseFloat(bodyMatch[1].replace(/\./g, '').replace(',', '.'));
+      const bodyPriceM = html.match(/Birim\s+Pay\s+Fiyatı[\s\S]{0,400}?(\d[\d.,]*)/i);
+      if (bodyPriceM) price = parseFonalyPriceRaw(bodyPriceM[1]);
     }
-
-    // changePct yedek kalıpları (sırayla dene).
-    // Not: \s NBSP'yi de kapsar; SIGN Unicode eksi (U+2212)'i de tanır.
-    const SIGN = '[+\u2212-]';
-    //  a) "günlük getiri [+0,46%]" — meta varyantları (sonek, iki nokta, =)
     if (changePct === null) {
-      const m1 = html.match(new RegExp(`günlük\\s+getiri[sıı]*\\s*[:=]?\\s*(${SIGN}?[\\d.,]+)\\s*%`, 'i'));
-      if (m1 && m1[1]) {
-        const n = parseFloat(m1[1].replace(',', '.'));
-        if (Number.isFinite(n) && Math.abs(n) < 30) changePct = n;
-      }
-    }
-    //  b) "Birim Pay Fiyatı ... [+0,46%]" — gövde bloğu (ok aranmaz: SVG olabilir)
-    //  c) "±% ▲/▼" — eski layout
-    if (changePct === null) {
-      const m2 =
-        html.match(new RegExp(`Birim\\s+Pay\\s+Fiyatı[\\s\\S]{0,200}?(${SIGN})\\s*([\\d.,]+)\\s*%`, 'i')) ??
-        html.match(new RegExp(`(${SIGN})\\s*([\\d.,]+)\\s*%\\s*[▲▼]`));
-      if (m2 && m2[1] && m2[2]) {
-        const n = parseFloat(m2[2].replace(',', '.'));
-        if (Number.isFinite(n) && Math.abs(n) < 30) {
-          changePct = (m2[1] === '+' ? 1 : -1) * n;
-        }
-      }
-    }
-    //  d) Son çare: fiyat rakamlarının hemen ardındaki ilk ±% (metinden bağımsız)
-    if (changePct === null && price !== null) {
-      const prefix = String(price).slice(0, 5).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const m3 = html.match(new RegExp(`${prefix}[\\d.,]*[\\s\\S]{0,80}?(${SIGN})\\s*([\\d.,]+)\\s*%`));
-      if (m3 && m3[1] && m3[2]) {
-        const n = parseFloat(m3[2].replace(',', '.'));
-        if (Number.isFinite(n) && Math.abs(n) < 30) {
-          changePct = (m3[1] === '+' ? 1 : -1) * n;
-        }
+      const bodyPctM = html.match(/Birim\s+Pay\s+Fiyatı[\s\S]{0,600}?([+\-−\u2212]?\s*[\d.,]+\s*%)\s*[▲▼]?/i);
+      if (bodyPctM) {
+        const num = bodyPctM[1].match(/([+\-−\u2212]?[\d.,]+)/);
+        if (num) changePct = parseFonalyChangeRaw(num[1]);
       }
     }
 
-    if (!Number.isFinite(price as number) || (price as number) <= 0) return null;
-    return { price: price as number, changePct, asOf: new Date().toLocaleDateString('tr-TR') };
+    // 4) Fallback: "▲/▼" işaretli ilk %
+    if (changePct === null) {
+      const arrowPct = html.match(/([+\-−\u2212]\s*[\d.,]+\s*%)\s*[▲▼]/);
+      if (arrowPct) {
+        const num = arrowPct[1].match(/([+\-−\u2212]?[\d.,]+)/);
+        if (num) changePct = parseFonalyChangeRaw(num[1]);
+      }
+    }
+
+    if (price === null) return null;
+    return { price, changePct, asOf: new Date().toLocaleDateString('tr-TR') };
   } catch {
     return null;
   }
@@ -343,8 +380,9 @@ export async function getMarketData(): Promise<MarketData> {
     const live = await fetchLiveQuotes();
 
     if (live.okCount > 0) {
-      const positions: Record<string, MarketQuote> = { ...base.positions };
-      for (const [code, q] of Object.entries(live.positions)) positions[code] = q;
+      // Canlı varsa SADECE canlı pozisyonlar — seed'i live gibi gösterme (P1 #4 fix)
+      // Seed fallback yalnızca hiç canlı yoksa (aşağıdaki else) kullanılır.
+      const positions: Record<string, MarketQuote> = { ...live.positions };
 
       const data: MarketData = {
         source: 'live',
