@@ -93,8 +93,39 @@ def main() -> None:
         tweet_id = str(t.get("id") or t.get("tweet_id") or t.get("id_str") or "")
         text = t.get("text") or t.get("full_text") or ""
         created_at = t.get("created_at") or t.get("timestamp") or ""
+        # Fotoğraflı günlük etki tablosu için media URL'leri (güvenli: yalnızca URL, secret yok)
+        media_urls: list[str] = []
+        # 1) doğrudan media alanları
+        for key in ("media", "media_urls", "images"):
+            val = t.get(key)
+            if isinstance(val, list):
+                for m in val:
+                    if isinstance(m, str) and m.startswith("http"):
+                        media_urls.append(m)
+                    elif isinstance(m, dict):
+                        u = m.get("media_url_https") or m.get("media_url") or m.get("url") or m.get("src")
+                        if isinstance(u, str) and u.startswith("http"):
+                            media_urls.append(u)
+        # 2) extended_entities.media
+        ext = t.get("extended_entities") or {}
+        if isinstance(ext, dict):
+            for m in ext.get("media", []) or []:
+                if isinstance(m, dict):
+                    u = m.get("media_url_https") or m.get("media_url") or m.get("url")
+                    if isinstance(u, str) and u.startswith("http"):
+                        media_urls.append(u)
+        # 3) entities.media
+        ent = t.get("entities") or {}
+        if isinstance(ent, dict):
+            for m in ent.get("media", []) or []:
+                if isinstance(m, dict):
+                    u = m.get("media_url_https") or m.get("media_url") or m.get("url")
+                    if isinstance(u, str) and u.startswith("http"):
+                        media_urls.append(u)
+        # Tekilleştir, en fazla 4 foto (günlük etki tek foto)
+        media_urls = list(dict.fromkeys(media_urls))[:4]
         if tweet_id and text:
-            out.append({"id": tweet_id, "text": text, "created_at": created_at})
+            out.append({"id": tweet_id, "text": text, "created_at": created_at, "media_urls": media_urls})
 
     os.makedirs("data", exist_ok=True)
     with open("data/tweets.json", "w", encoding="utf-8") as f:

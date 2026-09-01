@@ -23,7 +23,9 @@ import {
   loadAll, upsertPosition, upsertDecision, insertTransaction,
   insertCashMovement, insertPrediction, updatePrediction,
   setInitialCapital, saveDailySnapshot, upsertFundHolding, upsertFundHoldingAuto, deleteFundHolding,
+  approveProposal, rejectProposal,
 } from '@/lib/repo';
+import type { FundHoldingProposal } from '@/lib/repo';
 import { computeFundPrediction, displayablePrediction, FundPrediction, HoldingPrice } from '@/lib/fundHoldings';
 import { formatSensitive, formatPublic, maskText, readMaskPreference, writeMaskPreference, MASK } from '@/lib/mask';
 import { GUEST_TABS, USER_TABS, TabId } from '@/lib/tabs';
@@ -70,6 +72,7 @@ export default function Home() {
   const [cashMovements, setCashMovements] = useState<CashMovement[]>([]);
   const [predictions, setPredictions] = useState<SocialPrediction[]>([]);
   const [fundHoldings, setFundHoldings] = useState<FundHoldingRow[]>([]);
+  const [proposals, setProposals] = useState<FundHoldingProposal[]>([]);
   // Kanonik ad/tür eşlemesi SUNUCUDAN gelir (portföyü ele verdiği için bundle'da durmaz)
   const [assetMeta, setAssetMeta] = useState<Record<string, { name: string; type: Position['asset_type'] }>>({});
   const [holdingPrices, setHoldingPrices] = useState<Record<string, HoldingPrice | null>>({});
@@ -324,6 +327,7 @@ export default function Home() {
       setCashMovements(bundle.cashMovements);
       setPredictions(bundle.predictions);
       setFundHoldings(bundle.fundHoldings);
+      setProposals((bundle as any).proposals ?? []);
       setCashBalance(bundle.cashBalance ?? 0);
       setInitialCapitalState(bundle.initialCapital ?? 0);
       setDbState('connected');
@@ -776,10 +780,50 @@ export default function Home() {
     if (ok) setFundHoldings((prev) => prev.filter((r) => r.id !== id));
   };
 
+  const handleApproveProposal = async (p: FundHoldingProposal) => {
+    // Önce fund_holdings'e yaz (manual source, twitter-photo notu)
+    const draft = {
+      fund_code: p.fund_code,
+      ticker: p.ticker,
+      weight_pct: p.weight_pct,
+      as_of_date: new Date().toISOString().slice(0, 10),
+      notes: `twitterdan ${p.predictor_handle ?? '@sevketozhan'} hesabının günlük etki paylaşımından #${p.ticker} ağırlığı %${p.weight_pct} olarak değişti bilgisi çekildi (tweet ${p.source_tweet_id}) onaylandı`,
+    };
+    const ok1 = await track(`Fon içeriği onay ${p.fund_code} ${p.ticker}`, upsertFundHolding(draft as any));
+    if (!ok1) return;
+    // Proposal'ı approved yap
+    const ok2 = await track('Öneri onay', approveProposal(p.id));
+    if (ok2) {
+      setProposals((prev) => prev.filter((x) => x.id !== p.id));
+      setFundHoldings((prev) => {
+        const others = prev.filter((r) => !(r.fund_code === p.fund_code && r.ticker === p.ticker));
+        const existing = prev.find((r) => r.fund_code === p.fund_code && r.ticker === p.ticker);
+        return [
+          ...others,
+          {
+            id: existing?.id ?? `manual-${Date.now()}-${p.ticker}`,
+            fund_code: p.fund_code,
+            ticker: p.ticker,
+            company_name: existing?.company_name ?? null,
+            weight_pct: p.weight_pct,
+            as_of_date: draft.as_of_date,
+            source: 'manual' as const,
+            notes: draft.notes,
+          },
+        ];
+      });
+    }
+  };
+
+  const handleRejectProposal = async (id: string) => {
+    const ok = await track('Öneri reddet', rejectProposal(id));
+    if (ok) setProposals((prev) => prev.filter((x) => x.id !== id));
+  };
+
   const handleSignedOut = () => {
     // Oturum kapandı: kişisel veriler bellekten de silinir (misafir görünümü temiz).
     setPositions([]); setDecisions([]); setTransactions([]); setCashMovements([]);
-    setPredictions([]); setFundHoldings([]); setHoldingPrices({});
+    setPredictions([]); setFundHoldings([]); setProposals([]); setHoldingPrices({});
     setCashBalance(0); setInitialCapitalState(0);
     setWriteErrors({}); setLastSavedAt(null); setDbError(null);
     setAssetMeta({});
@@ -829,7 +873,7 @@ export default function Home() {
       <header className="border-b border-slate-800 bg-[#0d121f] px-4 py-2.5 flex items-center justify-between text-xs font-mono overflow-x-auto gap-6 sticky top-0 z-50">
         <div className="flex items-center gap-2 font-bold text-sky-400 shrink-0">
           <Activity className={`w-4 h-4 ${market.source === 'live' ? 'animate-pulse text-emerald-400' : 'text-amber-400'}`} />
-          <span>YATIRIM TERMİNALİ v3.3</span>
+          <span>YATIRIM TERMİNALİ v3.4</span>
           <span className={`px-1.5 py-0.5 rounded border text-[10px] ${
             market.source === 'live'
               ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
@@ -1192,16 +1236,19 @@ export default function Home() {
           </div>
         )}
 
-        {/* 4. 🧬 FON İÇERİĞİ (P3 + Twitter beslemeli) */}
+        {/* 4. 🧬 FON İÇERİĞİ (P3 + Twitter beslemeli + OCR onay kutusu) */}
         {!isGuest && visibleTab === 'funds' && (
           <FundContentTab
             rows={fundHoldings}
             prices={holdingPrices}
             predictions={predictions}
+            proposals={proposals}
             masked={masked}
             canWrite={dbState === 'connected'}
             onUpsert={handleUpsertHolding}
             onDelete={handleDeleteHolding}
+            onApproveProposal={handleApproveProposal}
+            onRejectProposal={handleRejectProposal}
           />
         )}
 
@@ -1621,7 +1668,7 @@ export default function Home() {
 
       {/* 🦶 FOOTER */}
       <footer className="border-t border-slate-800/80 bg-[#0d121f] px-6 py-3 text-center text-[10px] font-mono text-slate-500">
-        Yatırım Terminali v3.3 — *Bu sistemdeki analizler ve algoritmik modeller kişisel karar destek amaçlıdır, resmi yatırım tavsiyesi niteliğinde değildir.*
+        Yatırım Terminali v3.4 — *Bu sistemdeki analizler ve algoritmik modeller kişisel karar destek amaçlıdır, resmi yatırım tavsiyesi niteliğinde değildir.*
       </footer>
     </div>
   );
