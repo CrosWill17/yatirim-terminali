@@ -228,7 +228,7 @@ function parseFonalyChangeRaw(s: string): number | null {
   return n;
 }
 
-async function fetchFonalyQuote(code: string): Promise<MarketQuote | null> {
+export async function fetchFonalyQuote(code: string): Promise<MarketQuote | null> {
   try {
     const res = await fetchWithTimeout(`https://www.fonaly.com/funds/${code}`);
     if (!res.ok) return null;
@@ -552,5 +552,67 @@ export async function getStockQuotes(codes: string[]): Promise<Record<string, Ma
     out[code] = q;
   }
   stockInFlight = null;
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* FON NAV'LARI İÇİN DİNAMİK BESLEME (yeni hisse/fon otomatik fiyat)   */
+/* ------------------------------------------------------------------ */
+
+const fundNavCache = new Map<string, { q: MarketQuote | null; at: number }>();
+let fundNavInFlight: Map<string, Promise<MarketQuote | null>> | null = null;
+
+export async function getFundQuotes(codes: string[]): Promise<Record<string, MarketQuote | null>> {
+  const wanted = Array.from(
+    new Set(
+      codes.map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z0-9]{2,10}$/.test(c))
+    )
+  ).slice(0, 60);
+
+  const out: Record<string, MarketQuote | null> = {};
+  const missing: string[] = [];
+  for (const c of wanted) {
+    const hit = fundNavCache.get(c);
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) out[c] = hit.q;
+    else missing.push(c);
+  }
+  if (missing.length === 0) return out;
+
+  if (!fundNavInFlight) fundNavInFlight = new Map();
+  const jobs = missing.map(async (c) => {
+    const pending = fundNavInFlight?.get(c);
+    if (pending) return [c, await pending] as const;
+    const p = fetchFonalyQuote(c);
+    fundNavInFlight?.set(c, p);
+    return [c, await p] as const;
+  });
+
+  const settled = await Promise.all(jobs);
+  for (const [code, q] of settled) {
+    fundNavCache.set(code, { q, at: Date.now() });
+    out[code] = q;
+  }
+  fundNavInFlight = null;
+  return out;
+}
+
+/**
+ * Karışık (hisse + fon) fiyat beslemesi — yeni eklenen pozisyonlar için.
+ * Önce fon NAV (fonaly), sonra hisse (Yahoo .IS). İlk başarılı döner.
+ * Çözülemeyen → null (VERİ EKSİK).
+ */
+export async function getMixedQuotes(codes: string[]): Promise<Record<string, MarketQuote | null>> {
+  const wanted = Array.from(
+    new Set(codes.map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z0-9]{2,10}$/.test(c)))
+  ).slice(0, 60);
+
+  const [stockQs, fundQs] = await Promise.all([getStockQuotes(wanted), getFundQuotes(wanted)]);
+
+  const out: Record<string, MarketQuote | null> = {};
+  for (const c of wanted) {
+    // Fon fiyatı öncelikli: TEFAS fonları için Yahoo .IS yanlış olabilir, fonaly doğru
+    // Hisse için fonaly null dönecek, Yahoo dönecek
+    out[c] = fundQs[c] ?? stockQs[c] ?? null;
+  }
   return out;
 }

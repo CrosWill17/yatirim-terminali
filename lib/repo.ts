@@ -395,6 +395,24 @@ export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
   );
 }
 
+/** Otomatik araştırma: source='auto' — sync job'u ezebilir, manuel değil. */
+export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 'fintables' | 'rotaborsa' }): Promise<WriteResult> {
+  return write('upsertFundHoldingAuto', () =>
+    supabase.from('fund_holdings').upsert(
+      {
+        fund_code: h.fund_code,
+        ticker: h.ticker,
+        company_name: h.company_name ?? null,
+        weight_pct: h.weight_pct,
+        as_of_date: h.as_of_date,
+        source: (h as any).source ?? 'auto',
+        notes: h.notes ?? 'otomatik araştırma (fintables/rotaborsa)',
+      },
+      { onConflict: 'fund_code,ticker' }
+    )
+  );
+}
+
 export function deleteFundHolding(id: string): Promise<WriteResult> {
   return write('deleteFundHolding', () =>
     supabase.from('fund_holdings').delete().eq('id', id)

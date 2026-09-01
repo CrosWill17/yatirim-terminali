@@ -22,7 +22,7 @@ import { TÜR_LABEL } from '@/lib/assetMeta';
 import {
   loadAll, upsertPosition, upsertDecision, insertTransaction,
   insertCashMovement, insertPrediction, updatePrediction,
-  setInitialCapital, saveDailySnapshot, upsertFundHolding, deleteFundHolding,
+  setInitialCapital, saveDailySnapshot, upsertFundHolding, upsertFundHoldingAuto, deleteFundHolding,
 } from '@/lib/repo';
 import { computeFundPrediction, displayablePrediction, FundPrediction, HoldingPrice } from '@/lib/fundHoldings';
 import { formatSensitive, formatPublic, maskText, readMaskPreference, writeMaskPreference, MASK } from '@/lib/mask';
@@ -171,6 +171,45 @@ export default function Home() {
     return () => { cancelled = true; clearInterval(timer); };
   }, [configured, isGuest, accessToken]);
 
+  /* ------- Dinamik pozisyon fiyatları: yeni eklenen hisse/fon otomatik fiyat --------- */
+  useEffect(() => {
+    if (!configured || isGuest || positions.length === 0) return;
+    // market.positions'da olmayan semboller (yeni eklenenler)
+    const missing = Array.from(new Set(positions.map((p) => p.symbol))).filter((sym) => !market.positions?.[sym]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    // Fon + hisse karışık — /api/market/quotes artık fonaly + Yahoo deniyor
+    fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d?.quotes) return;
+        setMarket((prev) => {
+          const newPositions = { ...prev.positions };
+          let added = 0;
+          for (const [code, q] of Object.entries(d.quotes as Record<string, any>)) {
+            if (q && Number.isFinite(q.price) && q.price > 0) {
+              newPositions[code] = {
+                price: Number(q.price),
+                changePct: q.changePct != null && Number.isFinite(q.changePct) ? Number(q.changePct) : null,
+                asOf: new Date().toLocaleDateString('tr-TR'),
+              };
+              added++;
+            }
+          }
+          if (added === 0) return prev;
+          return {
+            ...prev,
+            positions: newPositions,
+            source: 'live' as const,
+            timestamp: new Date().toISOString(),
+            dataDate: new Date().toLocaleDateString('tr-TR'),
+          };
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [positions, market.positions, configured, isGuest]);
+
   /* ------------------- Yazma takibi (P0) -------------------------- */
   const pendingRef = useRef(0);
   /**
@@ -314,6 +353,72 @@ export default function Home() {
       .catch(() => { /* fiyatı eksik hisse → katkı 0 (VERİ EKSİK) */ });
     return () => { cancelled = true; };
   }, [fundHoldings, isGuest]);
+
+  /* --------- Yeni fonlar için içerik otomatik araştırma (P3 genişletme) -------- */
+  const researchingRef = React.useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (isGuest || positions.length === 0) return;
+    // TEFAS fonu olup fund_holdings'de hiç kaydı olmayan fonlar
+    const fundCodesInPortfolio = Array.from(
+      new Set(
+        positions
+          .filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF')
+          .map((p) => p.symbol.toUpperCase())
+      )
+    );
+    const existingFundCodes = new Set(fundHoldings.map((h) => h.fund_code.toUpperCase()));
+    const toResearch = fundCodesInPortfolio.filter((c) => !existingFundCodes.has(c) && !researchingRef.current.has(c) && !['KGM','TP2'].includes(c));
+    if (toResearch.length === 0) return;
+
+    toResearch.forEach((code) => researchingRef.current.add(code));
+
+    (async () => {
+      for (const code of toResearch) {
+        try {
+          if (!accessToken) continue;
+          const res = await fetch(`/api/fund-holdings/fetch?code=${encodeURIComponent(code)}`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          if (!res.ok) continue;
+          const data = await res.json();
+          if (!data?.ok || !Array.isArray(data.holdings) || data.holdings.length === 0) continue;
+
+          // Otomatik olarak fund_holdings'e yaz (source=auto, sync ezebilir)
+          for (const h of data.holdings) {
+            await track(`Fon içeriği otomatik ${code}`, upsertFundHoldingAuto({
+              fund_code: h.fund_code,
+              ticker: h.ticker,
+              company_name: h.company_name ?? null,
+              weight_pct: h.weight_pct,
+              as_of_date: h.as_of_date,
+              notes: h.notes ?? `${data.reportLabel ?? data.source} (otomatik)`,
+              source: data.source ?? 'auto',
+            } as any));
+          }
+
+          // Local state'e ekle (DB'den tekrar çekmeden anında görünsün)
+          setFundHoldings((prev) => {
+            const filtered = prev.filter((r) => r.fund_code.toUpperCase() !== code.toUpperCase());
+            const newRows = (data.holdings as any[]).map((h: any, idx: number) => ({
+              id: `auto-${code}-${h.ticker}-${idx}`,
+              fund_code: h.fund_code,
+              ticker: h.ticker,
+              company_name: h.company_name ?? null,
+              weight_pct: h.weight_pct,
+              as_of_date: h.as_of_date,
+              source: (data.source ?? 'auto') as any,
+              notes: h.notes ?? null,
+            }));
+            return [...filtered, ...newRows];
+          });
+        } catch {
+          // sessiz: bir sonraki turda tekrar denenecek
+        } finally {
+          researchingRef.current.delete(code);
+        }
+      }
+    })();
+  }, [positions, fundHoldings, isGuest, accessToken]);
 
   /* ------------------- Türetilmiş Değerler ------------------------ */
   const livePositions: Position[] = positions.map((pos) => {
@@ -1087,11 +1192,12 @@ export default function Home() {
           </div>
         )}
 
-        {/* 4. 🧬 FON İÇERİĞİ (P3) */}
+        {/* 4. 🧬 FON İÇERİĞİ (P3 + Twitter beslemeli) */}
         {!isGuest && visibleTab === 'funds' && (
           <FundContentTab
             rows={fundHoldings}
             prices={holdingPrices}
+            predictions={predictions}
             masked={masked}
             canWrite={dbState === 'connected'}
             onUpsert={handleUpsertHolding}
