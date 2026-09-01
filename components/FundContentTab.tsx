@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { Layers, Pencil, PlusCircle, Save, Trash2 } from 'lucide-react';
-import type { FundHoldingRow } from '@/lib/types';
+import { Layers, Pencil, PlusCircle, Save, Trash2, MessageCircle, TrendingUp } from 'lucide-react';
+import type { FundHoldingRow, SocialPrediction } from '@/lib/types';
 import type { HoldingPrice, FundPrediction } from '@/lib/fundHoldings';
 import { computeFundPrediction, summarizeHoldingRows } from '@/lib/fundHoldings';
 import { formatPublic, formatSensitive } from '@/lib/mask';
@@ -19,6 +19,7 @@ export interface FundHoldingDraft {
 interface Props {
   rows: FundHoldingRow[];
   prices: Record<string, HoldingPrice | null>;
+  predictions?: SocialPrediction[];
   masked: boolean;
   /** Veritabanı hazır değilse form devre dışı (yazma denemesi yapılmaz). */
   canWrite: boolean;
@@ -47,7 +48,7 @@ const EMPTY_FORM = {
  * Ağırlık % ve değişim % KAMU verisidir (KAP raporu) → maskelenmez.
  * Fiyatı eksik hisse: katkı 0, tabloda "VERİ EKSİK" (uydurma yok).
  */
-export default function FundContentTab({ rows, prices, masked, canWrite, onUpsert, onDelete }: Props) {
+export default function FundContentTab({ rows, prices, predictions = [], masked, canWrite, onUpsert, onDelete }: Props) {
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
@@ -66,7 +67,7 @@ export default function FundContentTab({ rows, prices, masked, canWrite, onUpser
     return map;
   }, [rows]);
 
-  const predictions = useMemo(() => {
+  const predictionsMap = useMemo(() => {
     const out: Record<string, FundPrediction> = {};
     byFund.forEach((list, code) => {
       out[code] = computeFundPrediction(
@@ -77,6 +78,22 @@ export default function FundContentTab({ rows, prices, masked, canWrite, onUpser
     });
     return out;
   }, [byFund, prices]);
+
+  // Sosyal tahminler — fon bazında grupla
+  const socialByFund = useMemo(() => {
+    const map = new Map<string, SocialPrediction[]>();
+    for (const p of predictions) {
+      const code = p.fund_code.toUpperCase();
+      const list = map.get(code) ?? [];
+      list.push(p);
+      map.set(code, list);
+    }
+    map.forEach((list) => list.sort((a, b) => b.prediction_date.localeCompare(a.prediction_date)));
+    return map;
+  }, [predictions]);
+
+  // Keep old name for compatibility inside render
+  const predictionsLocal = predictionsMap;
 
   const submit = async () => {
     const ticker = form.ticker.trim().toUpperCase();
@@ -142,7 +159,11 @@ export default function FundContentTab({ rows, prices, masked, canWrite, onUpser
 
       {summaries.map((s) => {
         const list = byFund.get(s.fundCode) ?? [];
-        const pred = predictions[s.fundCode];
+        const pred = predictionsLocal[s.fundCode];
+        const socialList = socialByFund.get(s.fundCode) ?? [];
+        const validSocial = socialList.filter((p) => p.predicted_return_pct != null && p.status !== 'VERI_EKSİK');
+        const avgSocial = validSocial.length > 0 ? validSocial.reduce((sum, p) => sum + (p.predicted_return_pct as number), 0) / validSocial.length : null;
+        const blended = pred && pred.predictedPct != null && avgSocial != null ? pred.predictedPct * 0.6 + avgSocial * 0.4 : null;
         return (
           <div key={s.fundCode} className="bg-[#111726] border border-slate-800 rounded-lg overflow-hidden">
             <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
@@ -179,6 +200,33 @@ export default function FundContentTab({ rows, prices, masked, canWrite, onUpser
                     <span className="text-amber-300"> • fiyatı eksik: {pred.missingTickers.join(', ')}</span>
                   )}
                 </div>
+                {/* Sosyal tahmin beslemesi */}
+                {socialList.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-slate-800/50 space-y-1">
+                    <div className="flex items-center gap-1 text-[10px] text-sky-300 font-bold">
+                      <MessageCircle className="w-3 h-3" /> SOSYAL TAHMİN ({socialList.length}) {avgSocial != null && <span className="text-slate-300">• Ort: {avgSocial >= 0 ? '+' : ''}{formatPublic(avgSocial, { digits: 2 })}%</span>}
+                      {blended != null && <span className="text-amber-300 flex items-center gap-1"><TrendingUp className="w-3 h-3" /> Birleştirilmiş: {blended >= 0 ? '+' : ''}{formatPublic(blended, { digits: 2 })}% (Model %60 + Sosyal %40)</span>}
+                    </div>
+                    <div className="space-y-0.5 max-h-20 overflow-y-auto">
+                      {socialList.slice(0, 3).map((sp) => (
+                        <div key={sp.id} className="flex items-center gap-2 text-[10px] text-slate-400">
+                          <span className="text-sky-400">{sp.predictor_handle}</span>
+                          <span className={`${(sp.predicted_return_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{sp.predicted_return_pct != null ? `${sp.predicted_return_pct >= 0 ? '+' : ''}${formatPublic(sp.predicted_return_pct, { digits: 2 })}%` : 'VERİ EKSİK'}</span>
+                          <span>{sp.prediction_date}</span>
+                          <span className={`px-1 rounded border text-[9px] ${sp.status === 'DOGRULANDI' ? 'bg-emerald-950 border-emerald-800 text-emerald-300' : sp.status === 'VERI_EKSİK' ? 'bg-amber-950 border-amber-800 text-amber-300' : 'bg-slate-800 border-slate-700 text-slate-300'}`}>{sp.status}</span>
+                          {sp.accuracy_score != null && <span className="text-slate-500">isabet %{formatPublic(sp.accuracy_score, { digits: 0 })}</span>}
+                        </div>
+                      ))}
+                      {socialList.length > 3 && <div className="text-[9px] text-slate-500">+{socialList.length - 3} daha → Sosyal Doğrulama sekmesinde</div>}
+                    </div>
+                  </div>
+                )}
+                {/* DFI özel uyarı — fintables secondary eksik veri */}
+                {s.fundCode === 'DFI' && s.totalWeightPct < 50 && (
+                  <div className="mt-2 text-[9px] text-amber-300 bg-amber-950/30 border border-amber-800 rounded px-2 py-1">
+                    ⚠️ DFI içeriği fintables secondary kaynaktan (free tier sadece 3 hisse gösteriyor, resmi hisse oranı %53.32). Resmi KAP PDF ile doğrulama için Faz 4 bekleniyor.
+                  </div>
+                )}
               </div>
             </div>
 

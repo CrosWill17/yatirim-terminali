@@ -1,16 +1,17 @@
 import { NextResponse } from 'next/server';
-import { getStockQuotes } from '@/lib/marketData';
+import { getMixedQuotes } from '@/lib/marketData';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * FON HİSSELERİ FİYATLARI (P3 — Günlük Tahmin + Fon İçeriği)
+ * KARIŞIK FİYAT BESLEMESİ (P3 + dinamik pozisyonlar)
  *
- * GET /api/market/quotes?symbols=OZATD,TUPRS,...
+ * GET /api/market/quotes?symbols=OZATD,TUPRS,TLY,DFI,...
  *
- * Yalnızca KAMUYA AÇIK fiyat verisi döner (BIST hisse fiyatı + günlük değişim).
- * Kodlar sunucuda doğrulanır (A-Z0-9, 2-10 karakter, en çok 60 kod).
- * Fiyatı çözülemeyen kod → null → arayüz "VERİ EKSİK" gösterir, katkı 0 sayılır.
+ * - BIST hisseleri → Yahoo Finance chart API (.IS)
+ * - TEFAS fonları → fonaly.com (birim pay fiyatı + günlük getiri)
+ * - Önce fon, sonra hisse denenir; ilk başarılı döner
+ * - Çözülemeyen kod → null → arayüz "VERİ EKSİK" gösterir (uydurma yok)
  */
 export async function GET(req: Request) {
   try {
@@ -20,7 +21,7 @@ export async function GET(req: Request) {
     if (codes.length === 0) {
       return NextResponse.json({ quotes: {} });
     }
-    const quotes = await getStockQuotes(codes);
+    const quotes = await getMixedQuotes(codes);
     return NextResponse.json({ quotes, requested: codes.length, at: new Date().toISOString() });
   } catch {
     return NextResponse.json({ error: 'Fiyatlar çekilemedi' }, { status: 500 });
