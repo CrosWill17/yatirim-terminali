@@ -101,6 +101,7 @@ export default function Home() {
   // İşlem ekleme formu
   const [txSymbol, setTxSymbol] = useState('');
   const [txType, setTxType] = useState<'ALIS' | 'SATIS' | 'TEMETTU'>('ALIS');
+  const [txAssetType, setTxAssetType] = useState<Position['asset_type']>('BIST_HISSE');
   const [txQty, setTxQty] = useState('');
   const [txPrice, setTxPrice] = useState('');
   const [txNotes, setTxNotes] = useState('');
@@ -178,7 +179,7 @@ export default function Home() {
         void upsertPosition({ ...pos, asset_name: m.name, asset_type: m.type });
       }
     });
-  }, [assetMeta]);
+  }, [assetMeta, positions]);
 
   /* ------- Canlı piyasa verisi: girişli kullanıcı (60 sn) --------- */
   useEffect(() => {
@@ -685,11 +686,13 @@ export default function Home() {
         const newUnitCost = Number((((oldCost + total) / newQty) * 10000).toFixed(0)) / 10000;
         nextPositions = positions.map((p) => (p.symbol === symbol ? { ...p, quantity: newQty, unit_cost: newUnitCost, current_action: 'TUT' } : p));
       } else {
+        // Kullanıcı seçimi + kanonik meta: meta varsa onu kullan, yoksa seçilen tür
+        const chosenType = (assetMeta[symbol]?.type ?? txAssetType) as Position['asset_type'];
         nextPositions = [
           ...positions,
           {
             id: Date.now().toString(), symbol, asset_name: assetMeta[symbol]?.name ?? symbol,
-            asset_type: assetMeta[symbol]?.type ?? 'BIST_HISSE',
+            asset_type: chosenType,
             quantity: q, unit_cost: price, current_price: market.positions?.[symbol]?.price ?? price,
             risk_score: 5, current_action: 'TUT', rationale: 'Terminal üzerinden açılan pozisyon.', is_active: true,
           },
@@ -1361,11 +1364,19 @@ export default function Home() {
               </div>
             </div>
 
-            {/* ➕ İşlem Ekleme */}
+            {/* ➕ İşlem Ekleme — fon/hisse seçici eklendi (THF doğru tanımlansın) */}
             <div className="bg-[#111726] border border-slate-800 rounded-lg p-5 font-mono text-xs space-y-3">
               <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2"><PlusCircle className="w-4 h-4 text-sky-400" /> İŞLEM EKLE (ALIŞ / SATIŞ / TEMETTU)</h3>
-              <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-                <input list="tx-symbols" value={txSymbol} onChange={(e) => setTxSymbol(e.target.value)} placeholder="KOD" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500 uppercase" />
+              <div className="grid grid-cols-2 md:grid-cols-7 gap-2">
+                <input list="tx-symbols" value={txSymbol} onChange={(e) => {
+                  const v = e.target.value.toUpperCase();
+                  setTxSymbol(v);
+                  // Otomatik tür tahmini: bilinen fon kodları → TEFAS_FON
+                  const knownFunds = ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2','KGM','TP2','TMV','PUK','TTE','PHE','PBR'];
+                  if (knownFunds.includes(v)) setTxAssetType('TEFAS_FON');
+                  else if (v === 'TP2') setTxAssetType('PPF');
+                  else if (assetMeta[v]?.type) setTxAssetType(assetMeta[v].type as any);
+                }} placeholder="KOD" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500 uppercase" />
                 <datalist id="tx-symbols">
                   {livePositions.filter((p) => p.quantity > 0).map((p) => <option key={p.symbol} value={p.symbol}>{p.asset_name}</option>)}
                 </datalist>
@@ -1373,6 +1384,11 @@ export default function Home() {
                   <option value="ALIS">ALIŞ</option>
                   <option value="SATIS">SATIŞ</option>
                   <option value="TEMETTU">TEMETTU</option>
+                </select>
+                <select value={txAssetType} onChange={(e) => setTxAssetType(e.target.value as any)} className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500" title="Yeni pozisyon için tür (fon/hisse)">
+                  <option value="BIST_HISSE">BIST_HISSE</option>
+                  <option value="TEFAS_FON">TEFAS_FON</option>
+                  <option value="PPF">PPF</option>
                 </select>
                 <input value={txQty} onChange={(e) => setTxQty(e.target.value)} placeholder="ADET" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500" />
                 <input value={txPrice} onChange={(e) => setTxPrice(e.target.value)} placeholder={txType === 'TEMETTU' ? 'PAY BAŞI TL' : 'FİYAT TL'} className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500" />
