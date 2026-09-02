@@ -1,6 +1,7 @@
 /**
  * YATIRIM TERMİNALİ v3.1 — FİNANSAL FORMÜLLER VE HESAPLAMA MOTORU
  */
+import { isEquityIntensiveFund } from './fundCodes';
 
 // 1. Gram Altın Hesaplama (Ons + USD/TRY)
 export function calculateGramGold(ounceGoldUsd: number, usdTry: number): number {
@@ -38,7 +39,7 @@ export function calculateGoldSilverRatio(ounceGoldUsd: number, ounceSilverUsd: n
   };
 }
 
-// 3. Stopaj Hesaplama
+// 3. Stopaj Hesaplama — hisse yoğun fonlar (THF vb.) %0
 export function calculateTax(
   assetType: string,
   symbol: string,
@@ -48,8 +49,8 @@ export function calculateTax(
   const profit = Math.max(0, sellTotalRevenue - buyTotalCost);
   let taxRate = 0;
 
-  // Hisse senedi yoğun fonlarda (THF vb.) veya BIST hisselerinde stopaj %0
-  if (assetType === 'BIST_HISSE' || symbol === 'THF') {
+  // Hisse senedi yoğun fonlar (THF vb.) veya BIST hisselerinde stopaj %0
+  if (assetType === 'BIST_HISSE' || isEquityIntensiveFund(symbol)) {
     taxRate = 0.0;
   } else if (assetType === 'TEFAS_FON' || assetType === 'PPF') {
     // Serbest ve diğer yatırım fonlarında güncel stopaj %17.5

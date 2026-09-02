@@ -28,10 +28,12 @@ export interface ParsedSocial {
   rawText: string;
 }
 
-/** Bilinen kodlar (portföy + @sevketozhan tweetlerindeki yaygın TEFAS fonları). */
+import { ALL_FUND_CODES } from './fundCodes';
+
+/** Bilinen kodlar (portföy + @sevketozhan tweetlerindeki yaygın TEFAS fonları) — tek kaynak fundCodes.ts + BIST */
 export const KNOWN_SYMBOLS: string[] = [
-  'TLY', 'DFI', 'KGM', 'TP2', 'THF', 'GUM', 'YZG', 'MJG', 'DMG', 'GMC',
-  'TMV', 'PUK', 'TTE', 'PHE', 'PBR', 'KHA', 'DOH', 'AFT', 'CPU', 'IJC',
+  ...(ALL_FUND_CODES as readonly string[]),
+  'KHA', 'DOH', 'AFT', 'CPU', 'IJC',
   'YAY', 'YIT', 'TPKG', 'TPKGY', 'TPKGYF1', 'HRZ', 'SNY', 'KLH',
   'SDTTR', 'KARCL', 'KTLEV', 'BALSU', 'TATEN', 'OZATD', 'ASELS', 'TERA',
   'TEHOL', 'BARMA', 'LIDER', 'NETCD', 'AKBNK',

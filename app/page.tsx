@@ -19,6 +19,7 @@ import type { MarketData } from '@/lib/marketData';
 import { PUBLIC_SEED_MARKET } from '@/lib/marketSeedPublic';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { TÜR_LABEL } from '@/lib/assetMeta';
+import { ALL_FUND_CODES, TEFAS_FON_CODES, isFundCode, isPpfCode, shouldAutoResearchFund } from '@/lib/fundCodes';
 import {
   loadAll, upsertPosition, upsertDecision, insertTransaction,
   insertCashMovement, insertPrediction, updatePrediction,
@@ -197,18 +198,37 @@ export default function Home() {
     return () => { cancelled = true; clearInterval(timer); };
   }, [configured, isGuest, accessToken]);
 
-  /* ------- Dinamik pozisyon fiyatları: yeni eklenen hisse/fon otomatik fiyat --------- */
+  /* ------- Dinamik pozisyon fiyatları: yeni eklenen hisse/fon otomatik fiyat (5dk backoff) --------- */
+  const failedQuotesRef = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!configured || isGuest || positions.length === 0) return;
-    // market.positions'da olmayan semboller (yeni eklenenler)
-    const missing = Array.from(new Set(positions.map((p) => p.symbol))).filter((sym) => !market.positions?.[sym]);
+    const now = Date.now();
+    const BACKOFF_MS = 5 * 60 * 1000; // fail ederse 5dk bekle
+    // market.positions'da olmayan semboller (yeni eklenenler) — backoff'lu
+    const missing = Array.from(new Set(positions.map((p) => p.symbol))).filter((sym) => {
+      if (market.positions?.[sym]) return false;
+      const lastFail = failedQuotesRef.current[sym] ?? 0;
+      return now - lastFail >= BACKOFF_MS;
+    });
     if (missing.length === 0) return;
     let cancelled = false;
     // Fon + hisse karışık — /api/market/quotes artık fonaly + Yahoo deniyor
     fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (cancelled || !d?.quotes) return;
+        if (cancelled || !d?.quotes) {
+          missing.forEach((c) => { failedQuotesRef.current[c] = now; });
+          return;
+        }
+        // Başarısız olanları backoff listesine ekle
+        for (const code of missing) {
+          const q = (d.quotes as any)[code];
+          if (!q || !Number.isFinite(q.price) || q.price <= 0) {
+            failedQuotesRef.current[code] = now;
+          } else {
+            delete failedQuotesRef.current[code];
+          }
+        }
         setMarket((prev) => {
           const newPositions = { ...prev.positions };
           let added = 0;
@@ -232,7 +252,9 @@ export default function Home() {
           };
         });
       })
-      .catch(() => {});
+      .catch(() => {
+        missing.forEach((c) => { failedQuotesRef.current[c] = now; });
+      });
     return () => { cancelled = true; };
   }, [positions, market.positions, configured, isGuest]);
 
@@ -386,17 +408,16 @@ export default function Home() {
   useEffect(() => {
     if (isGuest || positions.length === 0) return;
     // TEFAS fonu olup fund_holdings'de hiç kaydı olmayan fonlar — THF dahil
-    // asset_type kontrolü + bilinen fon kodları (TLY, DFI, THF, GUM vb.) için fallback
-    const KNOWN_FUND_CODES = ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2','KGM','TP2'];
+    // asset_type kontrolü + tek kaynak ALL_FUND_CODES fallback
     const fundCodesInPortfolio = Array.from(
       new Set(
         positions
-          .filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF' || KNOWN_FUND_CODES.includes(p.symbol.toUpperCase()))
+          .filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF' || isFundCode(p.symbol))
           .map((p) => p.symbol.toUpperCase())
       )
     );
     const existingFundCodes = new Set(fundHoldings.map((h) => h.fund_code.toUpperCase()));
-    const toResearch = fundCodesInPortfolio.filter((c) => !existingFundCodes.has(c) && !researchingRef.current.has(c) && !['KGM','TP2'].includes(c));
+    const toResearch = fundCodesInPortfolio.filter((c) => !existingFundCodes.has(c) && !researchingRef.current.has(c) && shouldAutoResearchFund(c));
     if (toResearch.length === 0) return;
 
     toResearch.forEach((code) => researchingRef.current.add(code));
@@ -1270,7 +1291,7 @@ export default function Home() {
             prices={holdingPrices}
             predictions={predictions}
             proposals={proposals}
-            portfolioFundCodes={Array.from(new Set(positions.filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF' || ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2'].includes(p.symbol.toUpperCase())).map((p) => p.symbol.toUpperCase())))}
+            portfolioFundCodes={Array.from(new Set(positions.filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF' || isFundCode(p.symbol)).map((p) => p.symbol.toUpperCase())))}
             masked={masked}
             canWrite={dbState === 'connected'}
             onUpsert={handleUpsertHolding}
@@ -1371,10 +1392,9 @@ export default function Home() {
                 <input list="tx-symbols" value={txSymbol} onChange={(e) => {
                   const v = e.target.value.toUpperCase();
                   setTxSymbol(v);
-                  // Otomatik tür tahmini: bilinen fon kodları → TEFAS_FON
-                  const knownFunds = ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2','KGM','TMV','PUK','TTE','PHE','PBR'];
-                  if (v === 'TP2') setTxAssetType('PPF');
-                  else if (knownFunds.includes(v)) setTxAssetType('TEFAS_FON');
+                  // Otomatik tür tahmini — tek kaynak fundCodes.ts
+                  if (isPpfCode(v)) setTxAssetType('PPF');
+                  else if (isFundCode(v)) setTxAssetType('TEFAS_FON');
                   else if (assetMeta[v]?.type) setTxAssetType(assetMeta[v].type as any);
                 }} placeholder="KOD" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500 uppercase" />
                 <datalist id="tx-symbols">

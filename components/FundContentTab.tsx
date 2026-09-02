@@ -6,6 +6,7 @@ import type { FundHoldingRow, SocialPrediction } from '@/lib/types';
 import type { HoldingPrice, FundPrediction } from '@/lib/fundHoldings';
 import { computeFundPrediction, summarizeHoldingRows } from '@/lib/fundHoldings';
 import { formatPublic } from '@/lib/mask';
+import { shouldAutoResearchFund } from '@/lib/fundCodes';
 import type { FundHoldingProposal } from '@/lib/repo';
 
 export interface FundHoldingDraft {
@@ -233,7 +234,7 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
       {/* Portföyde olup içeriği henüz çekilmemiş fonlar (THF dahil) — otomatik araştırma bekliyor */}
       {portfolioFundCodes.length > 0 && (() => {
         const existing = new Set(rows.map((r) => r.fund_code.toUpperCase()));
-        const missing = portfolioFundCodes.filter((c) => !existing.has(c.toUpperCase()) && !['KGM','TP2'].includes(c.toUpperCase()));
+        const missing = portfolioFundCodes.filter((c) => !existing.has(c.toUpperCase()) && shouldAutoResearchFund(c));
         if (missing.length === 0) return null;
         return (
           <div className="bg-sky-950/20 border border-sky-800 rounded-lg p-4 space-y-2">

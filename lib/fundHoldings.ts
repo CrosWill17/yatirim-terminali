@@ -65,14 +65,24 @@ export interface FundSourceConfig {
   url: string | null;
 }
 
-/** Portföydeki fonlar ve veri kaynakları (dinamik genişletme: THF eklendi). */
+/** Portföydeki fonlar ve veri kaynakları — TEK KAYNAK fundCodes.ts ile senkron */
 export const FUND_SOURCES: FundSourceConfig[] = [
   { code: 'TLY', name: 'TERA PORTFÖY BİRİNCİ SERBEST FON', kind: 'rotaborsa',
     url: 'https://rotaborsa.com/tera-portfoy-birinci-serbest-fon-tly-guncel-hisse-dagilimi/' },
-  { code: 'DFI', name: 'ATLAS PORTFÖY SERBEST FON', kind: 'fintables',
-    url: 'https://fintables.com/fonlar/DFI' },
-  { code: 'THF', name: 'TERA PORTFÖY HİSSE SENEDİ (TL) FONU (HİSSE SENEDİ YOĞUN FON)', kind: 'fintables',
-    url: 'https://fintables.com/fonlar/THF' },
+  { code: 'DFI', name: 'ATLAS PORTFÖY SERBEST FON', kind: 'fintables', url: 'https://fintables.com/fonlar/DFI' },
+  { code: 'THF', name: 'TERA PORTFÖY HİSSE SENEDİ (TL) FONU (HİSSE SENEDİ YOĞUN FON)', kind: 'fintables', url: 'https://fintables.com/fonlar/THF' },
+  // Genişletme: portföyde görülen diğer TEFAS fonları (fintables üzerinden)
+  { code: 'GUM', name: 'GUM - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/GUM' },
+  { code: 'YZG', name: 'YZG - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/YZG' },
+  { code: 'MJG', name: 'MJG - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/MJG' },
+  { code: 'DMG', name: 'DMG - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/DMG' },
+  { code: 'GMC', name: 'GMC - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/GMC' },
+  { code: 'AK2', name: 'AK2 - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/AK2' },
+  { code: 'TMV', name: 'TMV - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/TMV' },
+  { code: 'PUK', name: 'PUK - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/PUK' },
+  { code: 'TTE', name: 'TTE - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/TTE' },
+  { code: 'PHE', name: 'PHE - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/PHE' },
+  { code: 'PBR', name: 'PBR - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/PBR' },
   // KGM = gümüş katılım fonu (hisse yok → v2: gümüş proxy'si); TP2 = para piyasası (hisse yok)
   { code: 'KGM', name: 'KUVEYT TÜRK PORTFÖY GÜMÜŞ KATILIM FON SEPETİ FONU', kind: 'gold-proxy', url: null },
   { code: 'TP2', name: 'TERA PORTFÖY PARA PİYASASI (TL) FONU', kind: 'none', url: null },
