@@ -223,12 +223,12 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-            <Layers className="w-4 h-4 text-sky-400" /> FON İÇERİĞİ (HİSSE DAĞILIMI)
+            <Layers className="w-4 h-4 text-sky-400" /> FON İÇERİĞİ (HİSSE DAĞILIMI) — SÜREKLİ GÜNCELLEME
           </h2>
           <p className="text-[10px] text-slate-500 mt-1">
-            Kaynak: aylık KAP portföy dağılım raporları (otomatik job) + manuel override.
-            Fona etkisi %0,01&apos;in altındaki hisseler hesaplamaya alınmaz.
-            Twitter foto OCR önerileri onay kutusu ile manuel yazılır.
+            <span className="text-sky-300 font-bold">KAP PDF en doğru resmi kaynak</span> (TLY haftalık, THF aylık) ama fon yöneticisi günlük trade yapar.
+            Sürekli güncelleme: <span className="text-slate-300">KAP PDF (kap-pdf-sync günlük 08:00 TRT) + fintables/rotaborsa (fund-holdings-sync 09:00 & 18:00 TRT) + Twitter foto OCR (30dk)</span>.
+            KAP PDF taze iken (TLY 7 gün, THF 30 gün) auto overwrite edemez; bayatlayınca günlük trade takibi için auto devralır. Manuel override asla ezilmez.
           </p>
         </div>
         <span className="text-[10px] text-slate-400 bg-slate-900 border border-slate-800 px-2 py-1 rounded">
@@ -321,13 +321,32 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
         const avgSocial = validSocial.length > 0 ? validSocial.reduce((sum, p) => sum + (p.predicted_return_pct as number), 0) / validSocial.length : null;
         const blended = pred && pred.predictedPct != null && avgSocial != null ? pred.predictedPct * 0.6 + avgSocial * 0.4 : null;
         const fundProposals = proposalsByFund.get(s.fundCode) ?? [];
+
+        // Tazelik hesapla: asOfDate → gün farkı, eşik TLY 7, THF 30
+        const freshThreshold = s.fundCode === 'TLY' ? 7 : s.fundCode === 'THF' ? 30 : 45;
+        let ageDays: number | null = null;
+        let freshness: 'taze' | 'bayat' | 'yok' = 'yok';
+        if (s.asOfDate) {
+          const asOf = new Date(s.asOfDate);
+          if (!isNaN(asOf.getTime())) {
+            ageDays = Math.floor((Date.now() - asOf.getTime()) / (1000 * 60 * 60 * 24));
+            freshness = ageDays <= freshThreshold ? 'taze' : 'bayat';
+          }
+        }
+        const hasKapPdf = s.sources.includes('kap-pdf');
+        const hasAuto = s.sources.some((src) => ['auto', 'fintables', 'rotaborsa'].includes(src));
         return (
           <div key={s.fundCode} className="bg-[#111726] border border-slate-800 rounded-lg overflow-hidden">
             <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="font-bold text-sky-300 text-sm">{s.fundCode}</h3>
+                <h3 className="font-bold text-sky-300 text-sm flex items-center gap-2">
+                  {s.fundCode}
+                  {hasKapPdf && freshness === 'taze' && <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">KAP PDF TAZE {ageDays}g</span>}
+                  {hasKapPdf && freshness === 'bayat' && <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-amber-950 text-amber-300 border border-amber-800">KAP PDF BAYAT {ageDays}g &gt;{freshThreshold}g → auto devrede</span>}
+                  {!hasKapPdf && hasAuto && <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-sky-950 text-sky-300 border border-sky-800">AUTO GÜNLÜK</span>}
+                </h3>
                 <div className="text-[10px] text-slate-500 mt-1 space-x-3">
-                  <span>📅 Rapor dönemi: <span className="text-slate-300">{s.asOfDate ?? '—'}</span></span>
+                  <span>📅 Rapor dönemi: <span className="text-slate-300">{s.asOfDate ?? '—'}</span>{ageDays != null && ` (${ageDays}g önce)`}</span>
                   <span>📦 Kaynak: <span className="text-slate-300">{s.sources.join(' + ') || '—'}</span></span>
                   <span>🔢 Satır: <span className="text-slate-300">{s.rowCount}</span></span>
                   <span>
@@ -345,6 +364,7 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
                   {fundProposals.length > 0 && (
                     <span className="text-amber-300">📷 {fundProposals.length} OCR öneri bekliyor</span>
                   )}
+                  <span className="text-slate-400">⏱️ Eşik: {freshThreshold}g</span>
                 </div>
               </div>
               <div className="text-right">
@@ -443,9 +463,13 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
                         </td>
                         <td className="p-3 text-center">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                            r.source === 'manual'
+                            r.source === 'kap-pdf'
+                              ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                              : r.source === 'manual'
                               ? 'bg-amber-950 text-amber-300 border-amber-800'
-                              : 'bg-slate-800 text-slate-300 border-slate-700'
+                              : r.source === 'calibration'
+                              ? 'bg-violet-950 text-violet-300 border-violet-800'
+                              : 'bg-sky-950 text-sky-300 border-sky-800'
                           }`}>{r.source}</span>
                         </td>
                         <td className="p-3 text-center">

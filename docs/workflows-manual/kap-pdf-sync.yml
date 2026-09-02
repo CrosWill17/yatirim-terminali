@@ -1,0 +1,62 @@
+name: kap-pdf-sync
+
+# KAP Portföy Dağılım Raporu otomatik çekme + parse + Supabase
+# Fon yöneticisi günlük trade yapabildiği için:
+#   - KAP PDF en doğru resmi kaynak (haftalık TLY, aylık THF)
+#   - Ama günlük değişimler için fund-holdings-sync (fintables/rotaborsa) de çalışır
+#   - KAP PDF taze ise (TLY 7 gün, THF 30 gün) auto overwrite edemez, bayatlayınca edebilir
+
+on:
+  schedule:
+    # Her gün 05:00 UTC (08:00 TRT) — KAP gece yayınlar, sabah çek
+    - cron: '0 5 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kap-pdf-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Kur (python kap-client + npm)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install kap-client httpx
+          npm ci
+
+      - name: 1/2 KAP PDF'leri çek (kap-client → data/kap_pdfs/)
+        run: |
+          python scripts/fund_holdings/kap_pdf_fetch.py
+        continue-on-error: false
+
+      - name: 2/2 Parse + Supabase upsert (source=kap-pdf, ana kaynak)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          npx -y tsx@4 scripts/fund_holdings/kap_pdf_upsert.ts
+
+      - name: Arşiv — indirilen PDF'ler (teşhis)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kap-pdfs
+          path: data/kap_pdfs/
+          if-no-files-found: ignore

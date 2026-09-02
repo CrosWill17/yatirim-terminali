@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/shadow/calibrate?fundCode=TLY",
+      "schedule": "30 6 * * 1-5"
+    },
+    {
+      "path": "/api/shadow/calibrate?fundCode=THF",
+      "schedule": "35 6 * * 1-5"
+    },
+    {
+      "path": "/api/shadow/calibrate?fundCode=DFI",
+      "schedule": "40 6 * * 1-5"
+    }
+  ]
+}

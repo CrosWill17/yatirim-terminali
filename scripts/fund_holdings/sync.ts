@@ -104,28 +104,45 @@ async function main(): Promise<void> {
   let deleted = 0;
   let skippedManual = 0;
 
+  // KAP PDF tazelik eşikleri: fon yöneticisi günlük trade yapabildiği için
+  // KAP PDF taze iken koru, bayatlayınca auto kaynakların overwrite etmesine izin ver
+  // TLY haftalık rapor → 7 gün, THF aylık → 30 gün, diğerleri 45 gün
+  const KAP_FRESH_DAYS: Record<string, number> = { TLY: 7, THF: 30 };
+  const DEFAULT_FRESH = 45;
+
   for (const [fundCode, rows] of Array.from(loaded.entries())) {
     const tickers = rows.map((r) => r.ticker);
 
-    // 1) Manuel ve KAP PDF override'ları koru: source='manual' ve 'kap-pdf' ASLA ezilmez (ham veri, onay gerektirmez)
-    //    KAP PDF ana veri kaynağıdır (kullanıcı şartı)
     const { data: existing } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('fund_code', fundCode);
-    const protectedTickers = new Set((existing ?? []).filter((e) => ['manual', 'kap-pdf', 'calibration'].includes(e.source)).map((e) => e.ticker));
+
+    // En güncel kap-pdf tarihini bul ve yaşını hesapla
+    const kapRows = (existing ?? []).filter((e) => e.source === 'kap-pdf' && e.as_of_date);
+    let latestKapDate: Date | null = null;
+    for (const e of kapRows) {
+      const d = new Date(e.as_of_date);
+      if (!Number.isNaN(d.getTime()) && (!latestKapDate || d > latestKapDate)) latestKapDate = d;
+    }
+    const now = new Date();
+    const kapAgeDays = latestKapDate ? (now.getTime() - latestKapDate.getTime()) / (1000 * 60 * 60 * 24) : Infinity;
+    const freshThreshold = KAP_FRESH_DAYS[fundCode] ?? DEFAULT_FRESH;
+    const isKapFresh = kapAgeDays <= freshThreshold;
+
+    // Korunan ticker'lar: manual ve calibration ASLA ezilmez.
+    // kap-pdf: sadece taze iken korunur (günlük trade için bayatlayınca auto overwrite izni)
+    const protectedTickers = new Set<string>();
+    for (const e of existing ?? []) {
+      if (e.source === 'manual' || e.source === 'calibration') protectedTickers.add(e.ticker);
+      else if (e.source === 'kap-pdf' && isKapFresh) protectedTickers.add(e.ticker);
+    }
     const autoRows = rows.filter((r) => !protectedTickers.has(r.ticker));
     skippedManual += protectedTickers.size;
 
-    // Eğer mevcutta kap-pdf varsa ve tarihi 45 günden yeniyse, bu fonu tamamen atla (KAP ana kaynak)
-    const hasRecentKapPdf = (existing ?? []).some((e) => {
-      if (e.source !== 'kap-pdf' && e.source !== 'manual') return false;
-      if (!e.as_of_date) return false;
-      const asOf = new Date(e.as_of_date);
-      const now = new Date();
-      const diffDays = (now.getTime() - asOf.getTime()) / (1000 * 60 * 60 * 24);
-      return diffDays <= 45;
-    });
-    if (hasRecentKapPdf) {
-      console.log(`SKIP [${fundCode}]: son 45 günde KAP PDF/manual var, otomatik kaynak ezilmeyecek (KAP ana kaynak)`);
-      continue;
+    if (kapRows.length > 0) {
+      console.log(
+        `INFO [${fundCode}]: KAP PDF son tarih ${latestKapDate?.toISOString().slice(0, 10) ?? 'yok'} (${kapAgeDays.toFixed(1)} gün önce), eşik ${freshThreshold} gün → ${isKapFresh ? 'TAZE (korunuyor)' : 'BAYAT (auto overwrite izni)'}`
+      );
+    } else {
+      console.log(`INFO [${fundCode}]: KAP PDF yok, auto tam yetki`);
     }
 
     // 2) Upsert (fund_code + ticker anahtarı)
@@ -137,9 +154,14 @@ async function main(): Promise<void> {
       inserted += autoRows.length;
     }
 
-    // 3) Rapor ortadan kalkan otomatik satırları sil (manuel ve kap-pdf dokunulmaz)
+    // 3) Rapor ortadan kalkan satırları sil
+    //    - manual ve calibration ASLA silinmez
+    //    - kap-pdf: taze ise silinmez, bayat ise ve yeni raporda yoksa silinebilir (satılmış)
     const keepSet = new Set(tickers);
-    const stale = (existing ?? []).filter((e) => !['manual', 'kap-pdf', 'calibration'].includes(e.source) && !keepSet.has(e.ticker));
+    const stale = (existing ?? []).filter((e) => {
+      if (protectedTickers.has(e.ticker)) return false; // korunanlar silinmez
+      return !keepSet.has(e.ticker);
+    });
     if (stale.length > 0) {
       const { error } = await supabase
         .from('fund_holdings')

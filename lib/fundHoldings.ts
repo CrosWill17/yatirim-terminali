@@ -293,7 +293,7 @@ export interface HoldingRow {
   company_name: string | null;
   weight_pct: number;
   as_of_date: string;
-  source: 'auto' | 'calibration' | 'manual';
+  source: 'auto' | 'manual' | 'kap-pdf' | 'calibration' | 'fintables' | 'rotaborsa';
   notes: string | null;
 }
 

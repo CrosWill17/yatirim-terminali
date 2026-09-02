@@ -1,0 +1,3031 @@
+# REPO BUNDLE FOR AI - yatirim-terminali
+Generated: Wed Sep  2 11:23:25 UTC 2026
+
+
+====================================================================
+FILE: package.json
+====================================================================
+{
+  "name": "yatirim-terminali-v3",
+  "version": "3.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.48.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "next": "14.2.35",
+    "pdf-parse": "^1.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^3.10.1",
+    "tailwind-merge": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.19",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.2",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.11"
+  }
+}
+
+
+====================================================================
+FILE: lib/types.ts
+====================================================================
+export type AssetType = 'BIST_HISSE' | 'TEFAS_FON' | 'EMTIA_ETF' | 'PPF';
+export type ActionType = 'AL' | 'SAT' | 'TUT' | 'KADEMELI_SAT' | '2/3 CIKIS';
+export type DecisionStatus = 'bekliyor' | 'onaylandi' | 'uygulandi' | 'reddedildi';
+
+export interface Position {
+  id: string;
+  symbol: string;
+  asset_name: string;
+  asset_type: AssetType;
+  quantity: number;
+  unit_cost: number;
+  current_price?: number;
+  /** Günlük değişim (%). null = bu tarih için bilinmiyor. */
+  daily_change_pct?: number | null;
+  target_price?: number;
+  stop_price?: number;
+  risk_score: number;
+  current_action: string;
+  rationale: string;
+  is_active: boolean;
+}
+
+export interface Transaction {
+  id: string;
+  symbol: string;
+  transaction_type: 'ALIS' | 'SATIS' | 'TEMETTU';
+  quantity: number;
+  unit_price: number;
+  total_amount: number;
+  withholding_tax: number;
+  net_amount: number;
+  realized_pnl: number;
+  notes?: string;
+  created_at: string;
+}
+
+export interface CashMovement {
+  id: string;
+  movement_type: string;
+  amount: number;
+  balance_after: number;
+  description: string;
+  category: string;
+  created_at: string;
+}
+
+export interface Decision {
+  id: string;
+  symbol: string;
+  action_type: string;
+  status: DecisionStatus;
+  target_price?: number;
+  stop_price?: number;
+  risk_score: number;
+  details: string;
+  created_at: string;
+}
+
+export interface SocialPredictor {
+  id: string;
+  handle: string;
+  display_name: string;
+  trust_score: number;
+  total_predictions: number;
+  successful_predictions: number;
+  notes?: string;
+}
+
+export interface SocialPrediction {
+  id: string;
+  predictor_handle: string;
+  fund_code: string;
+  /** null = sayı çözülemedi (VERİ EKSİK) — uydurma değer yok. */
+  predicted_return_pct: number | null;
+  prediction_category: string;
+  raw_text: string;
+  prediction_date: string;
+  actual_return_pct?: number | null;
+  accuracy_score?: number | null;
+  status: 'BEKLIYOR' | 'DOGRULANDI' | 'GECERSIZ' | 'VERI_EKSİK';
+}
+
+export interface MarketTicker {
+  symbol: string;
+  name: string;
+  price: number;
+  changePct: number;
+  currency: string;
+}
+
+/**
+ * Fon içeriği satırı (fund_holdings tablosu).
+ * source='manual' / 'kap-pdf' → ana kaynak (ham veri, onay gerektirmez, sync ezmez)
+ * source='auto' / 'fintables' / 'rotaborsa' → ikincil kaynak, sync ezebilir
+ */
+export interface FundHoldingRow {
+  id: string;
+  fund_code: string;
+  ticker: string;
+  company_name: string | null;
+  weight_pct: number;
+  as_of_date: string;
+  source: 'auto' | 'calibration' | 'manual' | 'kap-pdf' | 'fintables' | 'rotaborsa';
+  notes: string | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Veri katmanı hata sözleşmesi (P0)                                   */
+/*                                                                     */
+/* supabase-js hata FIRLATMAZ; { data, error } döndürür. Bu yüzden her  */
+/* okuma/yazma işleminin sonucu açıkça bildirilir ve sessiz yutma       */
+/* imkânsızdır.                                                       */
+/* ------------------------------------------------------------------ */
+
+export type RepoErrorKind = 'setup' | 'network' | 'rls' | 'not_found' | 'unknown';
+
+export interface RepoError {
+  kind: RepoErrorKind;
+  /** Kullanıcıya gösterilebilir kısa sebep (ör. "new row violates row-level security policy"). */
+  message: string;
+  /** Hatanın oluştuğu işlem/tablo (log için). */
+  operation: string;
+}
+
+export type WriteResult = { ok: true } | { ok: false; error: RepoError };
+
+export const isWriteOk = (r: WriteResult): r is { ok: true } => r.ok;
+
+
+====================================================================
+FILE: lib/fundHoldings.ts
+====================================================================
+/**
+ * fundHoldings.ts — Fon içeriği: saf (side-effect'siz) parse + tahmin matematiği.
+ *
+ * KAYNAKLAR (araştırma sonucu, 26.08.2026):
+ *  - KAP (kap.org.tr)          → RESMİ kaynak. Aylık "Portföy Dağılım Raporu" PDF'leri.
+ *                                JS-rendered liste + PDF → v1'de otomasyon KESİN KAYNAK olarak
+ *                                değil, REFERANS/link olarak kullanılır (Faz 4: PDF parser).
+ *  - rotaborsa.com (TLY)       → tam hisse listesi, günlük güncellenen tablo (v1 birincil).
+ *  - fintables.com/fonlar/CODE → "En Büyük Pozisyonlar" + ağırlık değişimleri (v1: DFI).
+ *  - Manuel override           → UI formu; source='manual' satırları otomatik job asla ezmez.
+ *
+ * KURALLAR:
+ *  - Fona etkisi %0.01'in ALTINDA olan hisse dışlanır (filtre, kullanıcı şartı).
+ *  - Sayı çekilemeyen satır atılır; değer UYDURMAZ.
+ *  - Çıktılar hep saf veri (isim + ağırlık + tarih). Yorum yok.
+ */
+
+// ---------------------------------------------------------------------------
+// Tipler
+// ---------------------------------------------------------------------------
+
+export interface FundHolding {
+  ticker: string;
+  name: string | null;
+  weightPct: number;        // fon içindeki ağırlık (%)
+  prevWeightPct: number | null;
+}
+
+export interface ParsedFundContent {
+  fundCode: string;
+  asOfDate: string | null;  // rapor dönemi sonu (YYYY-MM-DD) — çözülemezse null
+  reportLabel: string | null; // ör. "Temmuz 2026 portföy dağılım raporu"
+  holdings: FundHolding[];
+  excludedCount: number;    // %0.01 filtresiyle dışlanan satır sayısı
+  source: string;           // 'rotaborsa' | 'fintables' | 'manual'
+}
+
+export interface HoldingPrice {
+  price: number;
+  changePct: number;        // günlük değişim (%) — önceki kapanışa göre
+}
+
+export interface FundPrediction {
+  fundCode: string;
+  predictedPct: number | null; // tahmini günlük getiri (%)
+  coveredPct: number;          // hesaplanan hisselerin fon ağırlığı toplamı (%)
+  contributions: { ticker: string; weightPct: number; changePct: number; impactPct: number }[];
+  missingTickers: string[];    // fiyatı alınamayan hisseler
+}
+
+// ---------------------------------------------------------------------------
+// Sabitler
+// ---------------------------------------------------------------------------
+
+/** Fona etkisi %0.01'in altındaki hisse hesaplamaya girmez (kullanıcı şartı). */
+export const MIN_IMPACT_PCT = 0.01;
+
+/** Ticker değil: para birimi / meta etiketleri ("Son Fiyat (TL)" sahtesini eleyin). */
+const NON_TICKER_TOKENS = new Set(['TL', 'TRY', 'USD', 'EUR', 'GBP', 'CHF', 'XAU', 'XAG', 'BIST', 'KAP']);
+
+export interface FundSourceConfig {
+  code: string;
+  name: string;
+  kind: 'rotaborsa' | 'fintables' | 'gold-proxy' | 'none';
+  url: string | null;
+}
+
+/** Portföydeki fonlar ve veri kaynakları — TEK KAYNAK fundCodes.ts ile senkron */
+export const FUND_SOURCES: FundSourceConfig[] = [
+  { code: 'TLY', name: 'TERA PORTFÖY BİRİNCİ SERBEST FON', kind: 'rotaborsa',
+    url: 'https://rotaborsa.com/tera-portfoy-birinci-serbest-fon-tly-guncel-hisse-dagilimi/' },
+  { code: 'DFI', name: 'ATLAS PORTFÖY SERBEST FON', kind: 'fintables', url: 'https://fintables.com/fonlar/DFI' },
+  { code: 'THF', name: 'TERA PORTFÖY HİSSE SENEDİ (TL) FONU (HİSSE SENEDİ YOĞUN FON)', kind: 'fintables', url: 'https://fintables.com/fonlar/THF' },
+  // Genişletme: portföyde görülen diğer TEFAS fonları (fintables üzerinden)
+  { code: 'GUM', name: 'GUM - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/GUM' },
+  { code: 'YZG', name: 'YZG - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/YZG' },
+  { code: 'MJG', name: 'MJG - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/MJG' },
+  { code: 'DMG', name: 'DMG - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/DMG' },
+  { code: 'GMC', name: 'GMC - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/GMC' },
+  { code: 'AK2', name: 'AK2 - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/AK2' },
+  { code: 'TMV', name: 'TMV - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/TMV' },
+  { code: 'PUK', name: 'PUK - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/PUK' },
+  { code: 'TTE', name: 'TTE - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/TTE' },
+  { code: 'PHE', name: 'PHE - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/PHE' },
+  { code: 'PBR', name: 'PBR - TEFAS FON', kind: 'fintables', url: 'https://fintables.com/fonlar/PBR' },
+  // KGM = gümüş katılım fonu (hisse yok → v2: gümüş proxy'si); TP2 = para piyasası (hisse yok)
+  { code: 'KGM', name: 'KUVEYT TÜRK PORTFÖY GÜMÜŞ KATILIM FON SEPETİ FONU', kind: 'gold-proxy', url: null },
+  { code: 'TP2', name: 'TERA PORTFÖY PARA PİYASASI (TL) FONU', kind: 'none', url: null },
+];
+
+const TR_MONTHS: Record<string, number> = {
+  ocak: 1, şubat: 2, subat: 2, mart: 3, nisan: 4, mayıs: 5, mayis: 5, haziran: 6,
+  temmuz: 7, ağustos: 8, agustos: 8, eylül: 9, eylul: 9, ekim: 10, kasım: 11, kasim: 11, aralık: 12, aralik: 12,
+};
+
+// ---------------------------------------------------------------------------
+// Yardımcılar
+// ---------------------------------------------------------------------------
+
+function norm(s: string): string {
+  return s.replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function stripTags(html: string): string {
+  return norm(html.replace(/<[^>]*>/g, ' '));
+}
+
+function parseNum(s: string | null | undefined): number | null {
+  if (!s) return null;
+  const cleaned = s.replace(/%/g, '').replace(/\s/g, '').replace(',', '.');
+  const n = Number.parseFloat(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** "Temmuz 2026" → "2026-07-31" (dönem sonu). Çözülemezse null. */
+export function monthEndOfLabel(label: string): string | null {
+  const m = label.toLowerCase().match(/(ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|temmuz|ağustos|agustos|eylül|eylul|ekim|kasım|kasim|aralık|aralık|aralik)\s+(\d{4})/);
+  if (!m) return null;
+  const month = TR_MONTHS[m[1].replace(/ı/g, 'i')] ?? null;
+  const year = parseInt(m[2], 10);
+  if (!month || year < 2000 || year > 2100) return null;
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
+/**
+ * "26 Ağustos 2026" (sayfa GÜNCELLEME tarihi) → bir önceki ayın sonu "2026-07-31".
+ * Gerekçe: KAP aylık portföy raporu, rapor ayından SONRAKİ ayın 1-10'u arası yayınlanır;
+ * yani güncelleme tarihi M ayıysa, sayfada duran ağırlıklar M-1 ayına aittir.
+ */
+export function prevMonthEndOfDate(day: string, monthLabel: string, year: string): string | null {
+  const monthNum = TR_MONTHS[monthLabel.toLowerCase().replace(/ı/g, 'i')] ?? null; // 1 tabanlı
+  const y = parseInt(year, 10);
+  const d = parseInt(day, 10);
+  if (!monthNum || y < 2000 || y > 2100 || d < 1 || d > 31) return null;
+  // Önceki ayın (monthNum-1) son günü: Date.UTC(y, 0-tabanlı indeks, 0) = bir önceki ayın sonu
+  const prevEnd = new Date(Date.UTC(y, monthNum - 1, 0));
+  return `${prevEnd.getUTCFullYear()}-${String(prevEnd.getUTCMonth() + 1).padStart(2, '0')}-${String(prevEnd.getUTCDate()).padStart(2, '0')}`;
+}
+
+// ---------------------------------------------------------------------------
+// rotaborsa.com parser (TLY)
+// ---------------------------------------------------------------------------
+
+/**
+ * rotaborsa.com fon sayfasının "fonu hisseleri" tablosunu çözer.
+ * Markup'a bağımlı olmadan çalışır: <tr> satırlarını tarar; ilk hücrede
+ * (TICKER) deseni + hücrelerde %ağırlık taşıyan satırları kabul eder.
+ */
+export function parseRotaborsaHoldings(html: string, fundCode: string): ParsedFundContent {
+  const holdings: FundHolding[] = [];
+  let excludedCount = 0;
+  const seen = new Set<string>();
+
+  const rows = html.match(/<tr[\s\S]*?<\/tr>/gi) ?? [];
+  for (const row of rows) {
+    const cells = Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)).map((m) => stripTags(m[1]));
+    if (cells.length < 2) continue;
+
+    // Ticker: "Şirket adı (TICKER)" deseni — BIST: 2-5 büyük harf.
+    const tickerMatch = cells[0].match(/\(([A-Z]{2,5})\)/);
+    if (!tickerMatch) continue;
+    const ticker = tickerMatch[1];
+    if (NON_TICKER_TOKENS.has(ticker)) continue; // "Son Fiyat (TL)" gibi sahte eşleşmeler
+    const name = norm(cells[0].replace(/\([A-Z]{2,5}\)/, '')) || null;
+    if (!name || name.length < 3) continue; // "ad" olmayan hücreler (ör. yalnızca "(TL)")
+
+    // Ağırlık hücresi mutlaka % formatında olmalı (fiyat/aded tablolarından ayrım)
+    const weightCell = norm(cells[1]);
+    if (!/^%[\d.,]+$/.test(weightCell)) continue;
+    const weight = parseNum(weightCell);
+    if (weight === null) continue;
+    const prev = cells.length > 2 ? parseNum(norm(cells[2])) : null;
+
+    if (weight < MIN_IMPACT_PCT) { excludedCount++; continue; }
+    if (seen.has(ticker)) continue;
+    seen.add(ticker);
+    holdings.push({ ticker, name, weightPct: weight, prevWeightPct: prev });
+  }
+
+  holdings.sort((a, b) => b.weightPct - a.weightPct);
+
+  // Güncelleme tarihi: "26 Ağustos 2026, 11:47 güncellendi" → rapor dönemi = önceki ay sonu
+  const asOfMatch = html.match(/(\d{1,2})\s+([A-Za-zÇĞİÖŞÜçğıöşü]{3,12})\s+(\d{4})[^\n]{0,60}güncell/i);
+  const asOfDate = asOfMatch ? prevMonthEndOfDate(asOfMatch[1], asOfMatch[2], asOfMatch[3]) : null;
+
+  return {
+    fundCode, asOfDate,
+    reportLabel: asOfDate ? `KAP aylık raporu (dönem sonu ${asOfDate})` : null,
+    holdings, excludedCount, source: 'rotaborsa',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// fintables.com parser
+// ---------------------------------------------------------------------------
+
+/**
+ * fintables.com/fonlar/{CODE} sayfasındaki pozisyon kartlarını çözer.
+ * Kart yapısı: <a href=".../sirketler/{TICKER}"> <img alt="{Şirket} Şirket Logosu"> %ağırlık %değişim </a>
+ * (href ÖNCE, ad/alt SONRA gelir — sırayı karıştırmayın.)
+ * Kart sayfada birden fazla kez görünür (En Büyük / Artırılan / Azaltılan) → ticker'a göre tekilleştir.
+ */
+export function parseFintablesHoldings(html: string, fundCode: string): ParsedFundContent {
+  const holdings: FundHolding[] = [];
+  let excludedCount = 0;
+  const seen = new Map<string, FundHolding>();
+
+  const cardRe = /sirketler\/([A-Za-z0-9]{2,12})"[\s\S]{0,400}?(?:alt="([^"]*?)(?: Şirket Logosu)?"[\s\S]{0,200}?)?%([\d.,]+)[\s\S]{0,200}?%(-?[\d.,]+)?/g;
+  let m: RegExpExecArray | null;
+  while ((m = cardRe.exec(html)) !== null) {
+    const name = m[2] ? norm(m[2]) || null : null;
+    const ticker = m[1].toUpperCase();
+    const weight = parseNum(m[3]);
+    // "değişim" sütunu = aylık ağırlık farkı → önceki ağırlık = güncel − değişim
+    const change = m[4] ? parseNum(m[4]) : null;
+    if (weight === null) continue;
+    if (seen.has(ticker)) continue;
+    if (weight < MIN_IMPACT_PCT) { excludedCount++; continue; }
+    seen.set(ticker, { ticker, name, weightPct: weight, prevWeightPct: change !== null ? weight - change : null });
+  }
+
+  seen.forEach((h) => holdings.push(h));
+  holdings.sort((a, b) => b.weightPct - a.weightPct);
+
+  // Rapor dönemi: "... 10 Ağustos tarihinde açıklanan Temmuz 2026 portföy dağılım raporu ..."
+  // (etiket <strong> içine gömülü olabilir → tag'leri silip ara)
+  const plain = stripTags(html);
+  let asOfDate: string | null = null;
+  let reportLabel: string | null = null;
+  const pm = plain.match(/açıklanan\s+([\wçğıöşü ]+?\s+\d{4})\s+portföy dağılım raporu/i);
+  if (pm) {
+    reportLabel = `${pm[1].trim()} portföy dağılım raporu`;
+    asOfDate = monthEndOfLabel(pm[1]);
+  }
+
+  return { fundCode, asOfDate, reportLabel, holdings, excludedCount, source: 'fintables' };
+}
+
+// ---------------------------------------------------------------------------
+// Tahmin matematiği
+// ---------------------------------------------------------------------------
+
+/**
+ * Fonun tahmini günlük getirisi: Σ (ağırlık_i × hisse_değişim_i) / 100
+ * coveredPct = hesaplanan hisselerin fon ağırlığı toplamı (fonun hisse oranı).
+ * Fiyatı eksik olan hisse: katkı 0 sayılır, missingTickers'a yazılır (uydurma yok).
+ */
+export function computeFundPrediction(
+  fundCode: string,
+  holdings: FundHolding[],
+  prices: Record<string, HoldingPrice | null>,
+): FundPrediction {
+  let predicted = 0;
+  let covered = 0;
+  const contributions: FundPrediction['contributions'] = [];
+  const missingTickers: string[] = [];
+
+  for (const h of holdings) {
+    const p = prices[h.ticker] ?? null;
+    if (!p || !Number.isFinite(p.price) || !Number.isFinite(p.changePct)) {
+      missingTickers.push(h.ticker);
+      continue;
+    }
+    const impact = (h.weightPct * p.changePct) / 100; // pp
+    predicted += impact;
+    covered += h.weightPct;
+    contributions.push({
+      ticker: h.ticker,
+      weightPct: h.weightPct,
+      changePct: p.changePct,
+      impactPct: impact,
+    });
+  }
+
+  contributions.sort((a, b) => Math.abs(b.impactPct) - Math.abs(a.impactPct));
+  return {
+    fundCode,
+    predictedPct: predicted,
+    coveredPct: covered,
+    contributions,
+    missingTickers,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Supabase satırları (Actions job'u kullanır)
+// ---------------------------------------------------------------------------
+
+export interface HoldingRow {
+  fund_code: string;
+  ticker: string;
+  company_name: string | null;
+  weight_pct: number;
+  as_of_date: string;
+  source: 'auto' | 'manual' | 'kap-pdf' | 'calibration' | 'fintables' | 'rotaborsa';
+  notes: string | null;
+}
+
+/** Dışlanan satır sayısı notes alanına bu etiketle yazılır (şema değişikliği yok). */
+export const EXCLUDED_TAG = 'dışlanan';
+
+export function toHoldingRows(parsed: ParsedFundContent): HoldingRow[] {
+  const base = parsed.reportLabel ?? parsed.source;
+  // Düşük etkili (< MIN_IMPACT_PCT) satır sayısı yalnızca parse anında bilinebilir;
+  // UI'da gösterebilmek için notes'a eklenir (uydurma yok: yoksa hiç yazılmaz).
+  const notes = parsed.excludedCount > 0 ? `${base} | ${EXCLUDED_TAG}: ${parsed.excludedCount}` : base;
+  return parsed.holdings.map((h) => ({
+    fund_code: parsed.fundCode,
+    ticker: h.ticker,
+    company_name: h.name,
+    weight_pct: h.weightPct,
+    as_of_date: parsed.asOfDate ?? new Date().toISOString().slice(0, 10),
+    source: 'auto' as const,
+    notes,
+  }));
+}
+
+/** notes içine gömülü dışlanan satır sayısını geri okur; yoksa null. */
+export function excludedFromNotes(notes: string | null | undefined): number | null {
+  if (!notes) return null;
+  const m = notes.match(new RegExp(`${EXCLUDED_TAG}\\s*:\\s*(\\d+)`));
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/* ---------------------------------------------------------------------------
+ * Fon içeriği özeti (UI — "Fon İçeriği" sekmesi başlık satırı)
+ * --------------------------------------------------------------------------- */
+
+export interface SummaryRow {
+  fund_code: string;
+  ticker: string;
+  company_name: string | null;
+  weight_pct: number;
+  as_of_date: string;
+  source: string;
+  notes: string | null;
+}
+
+export interface FundSummary {
+  fundCode: string;
+  /** En güncel rapor dönemi (satırların max'ı). */
+  asOfDate: string | null;
+  /** Satırların kaynakları (auto / manual karışabilir). */
+  sources: string[];
+  rowCount: number;
+  manualCount: number;
+  /** Ağırlık toplamı (%) — 100'ü aşarsa parse/veri hatası işaretidir. */
+  totalWeightPct: number;
+  /** Düşük etkili satır sayısı (biliniyorsa); null = kayıtta yok. */
+  excludedCount: number | null;
+}
+
+/** fund_holdings satırlarını fon bazında özetler (saf fonksiyon). */
+export function summarizeHoldingRows(rows: SummaryRow[]): FundSummary[] {
+  const byFund = new Map<string, SummaryRow[]>();
+  rows.forEach((r: SummaryRow) => {
+    const list = byFund.get(r.fund_code) ?? [];
+    list.push(r);
+    byFund.set(r.fund_code, list);
+  });
+
+  const fundCodes = Array.from(byFund.keys()).sort((a, b) => a.localeCompare(b));
+  const out: FundSummary[] = [];
+  for (const fundCode of fundCodes) {
+    const list: SummaryRow[] = byFund.get(fundCode) ?? [];
+    const dates = list.map((r: SummaryRow) => r.as_of_date).filter(Boolean).sort();
+    let excluded: number | null = null;
+    for (const r of list) {
+      const e = excludedFromNotes(r.notes);
+      if (e !== null) { excluded = e; break; }
+    }
+    const sources: string[] = [];
+    for (const r of list) if (sources.indexOf(r.source) === -1) sources.push(r.source);
+    out.push({
+      fundCode,
+      asOfDate: dates.length > 0 ? dates[dates.length - 1] : null,
+      sources: sources.sort(),
+      rowCount: list.length,
+      manualCount: list.filter((r: SummaryRow) => r.source === 'manual').length,
+      totalWeightPct: Number(
+        list.reduce((s: number, r: SummaryRow) => s + (Number.isFinite(r.weight_pct) ? r.weight_pct : 0), 0).toFixed(4)
+      ),
+      excludedCount: excluded,
+    });
+  }
+  return out;
+}
+
+/** Parse sonuçlarını doğrulama (Actions job'u: yoruma girmeden durdurur). */
+export function validateParsed(p: ParsedFundContent): { ok: boolean; reason: string | null } {
+  if (p.holdings.length === 0) return { ok: false, reason: 'hiç hisse bulunamadı (sayfa yapısı değişmiş olabilir)' };
+  const total = p.holdings.reduce((s, h) => s + h.weightPct, 0);
+  if (total > 100.0001) return { ok: false, reason: `ağırlık toplamı %${total.toFixed(2)} > 100 (parse hatası)` };
+  if (total < 1) return { ok: false, reason: `ağırlık toplamı %${total.toFixed(2)} < 1 (parse hatası)` };
+  return { ok: true, reason: null };
+}
+
+/**
+ * GÖSTERİLEBİLİR TAHMİN (v1 kuralı: uydurma yok)
+ *
+ * Fon içeriği kaydı olmayan fonlar (KGM = gümüş katılım, TP2 = para piyasası)
+ * için ağırlıklı tahmin HESAPLANAMAZ → arayüz "—" gösterir.
+ * Fiyatı çözülemeyen hisseler yüzünden hiçbir katkı hesaplanamadıysa da null döner.
+ */
+export function displayablePrediction(p: FundPrediction | null | undefined): FundPrediction | null {
+  if (!p || p.contributions.length === 0) return null;
+  return p;
+}
+
+
+====================================================================
+FILE: lib/kapPdfParser.ts
+====================================================================
+/**
+ * KAP Portföy Dağılım Raporu PDF parser — TLY ve diğer fonlar için
+ *
+ * KAP PDF'leri metin tabanlıdır (taranmış değil). Tablo yapısı:
+ *   MENKUL KIYMET | DÖVİZ | İHRAÇÇI | ... | TOPLAM DEĞER | GRUP (%) | FPD | FTD
+ *
+ * Örnek satır (pipe'lı markdown'tan veya düz metinden):
+ *   DSTKF TL DESTEK FAKTORING ... 6,797,248,065.00 38,36 36,91 37,28
+ *   PEHOL TL Pera Yatırım ... 5,447,827,275.00 30,75 29,60 29,88
+ *
+ * Aynı ticker birden fazla lot halinde görünebilir → ağırlıklar toplanır.
+ *
+ * Kurallar (kullanıcı şartları):
+ *  - %0.01 altı atılır (MIN_IMPACT_PCT)
+ *  - Sayı çekilemeyen satır atılır, uydurma yok
+ *  - Tarih: başlıkta "Nisan-2025" veya "Temmuz 2025" → ay sonu YYYY-MM-DD
+ *  - Doğrulama: toplam ağırlık >100.01 veya <1 ise hata
+ */
+
+import { MIN_IMPACT_PCT, type ParsedFundContent, type FundHolding } from './fundHoldings';
+
+const TR_MONTHS: Record<string, number> = {
+  ocak: 1, subat: 2, şubat: 2, mart: 3, nisan: 4, mayis: 5, mayıs: 5,
+  haziran: 6, temmuz: 7, agustos: 8, ağustos: 8, eylul: 9, eylül: 9,
+  ekim: 10, kasim: 11, kasım: 11, aralik: 12, aralık: 12,
+};
+
+function parseNumTR(s: string): number | null {
+  // "38,36" → 38.36, "22.358.551,50" → 22358551.5 (nokta binlik ayırıcı)
+  let t = s.trim().replace(/\u00a0/g, '').replace(/%/g, '').trim();
+  if (!t) return null;
+  // Binlik noktaları temizle, virgülü noktaya çevir
+  // Eğer hem . hem , varsa: son virgül ondalık
+  if (t.includes(',') && t.includes('.')) {
+    t = t.replace(/\./g, '').replace(',', '.');
+  } else if (t.includes(',')) {
+    t = t.replace(',', '.');
+  }
+  const n = parseFloat(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+function monthEndFromLabel(label: string): string | null {
+  // "Nisan-2025" veya "Nisan 2025" veya "Temmuz 2025"
+  const m = label.toLowerCase().match(/(ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|temmuz|ağustos|agustos|eylül|eylul|ekim|kasım|kasim|aralık|aralik)[\s\-]+(\d{4})/);
+  if (!m) return null;
+  const month = TR_MONTHS[m[1]] ?? null;
+  const year = parseInt(m[2], 10);
+  if (!month || year < 2000 || year > 2100) return null;
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
+function extractReportDate(text: string): { asOfDate: string | null; label: string | null } {
+  // Öncelik: "Nisan-2025" başlıkta
+  const patterns = [
+    /(Ocak|Şubat|Subat|Mart|Nisan|Mayıs|Mayis|Haziran|Temmuz|Ağustos|Agustos|Eylül|Eylul|Ekim|Kasım|Kasim|Aralık|Aralik)[\s\-]+20\d{2}/gi,
+    /20\d{2}\s*[-–]\s*(Ocak|Şubat|Subat|Mart|Nisan|Mayıs|Mayis|Haziran|Temmuz|Ağustos|Agustos|Eylül|Eylul|Ekim|Kasım|Kasim|Aralık|Aralik)/gi,
+  ];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const label = m[0].trim();
+      const asOf = monthEndFromLabel(label);
+      if (asOf) return { asOfDate: asOf, label };
+    }
+  }
+  // Fallback: "30/04/25" gibi tarihlerden en güncel olanı al, ay sonuna çevir
+  const dateRe = /(\d{2})\/(\d{2})\/(\d{2,4})/g;
+  let latest: Date | null = null;
+  let mm: RegExpExecArray | null;
+  while ((mm = dateRe.exec(text)) !== null) {
+    const d = parseInt(mm[1], 10);
+    const mo = parseInt(mm[2], 10);
+    let y = parseInt(mm[3], 10);
+    if (y < 100) y += 2000;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) continue;
+    const dt = new Date(Date.UTC(y, mo - 1, d));
+    if (!latest || dt > latest) latest = dt;
+  }
+  if (latest) {
+    const y = latest.getUTCFullYear();
+    const mo = latest.getUTCMonth() + 1;
+    const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    const asOf = `${y}-${String(mo).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    return { asOfDate: asOf, label: `${y}-${mo} raporu (tarihten türetildi)` };
+  }
+  return { asOfDate: null, label: null };
+}
+
+/**
+ * Ham PDF metninden (pdf-parse çıktısı) fon içeriğini çıkarır.
+ * Pipe'lı markdown (fetch_page) veya düz metin ikisini de destekler.
+ */
+export function parseKapPdfHoldings(rawText: string, fundCode: string): ParsedFundContent {
+  const holdingsMap = new Map<string, { name: string | null; weight: number; count: number }>();
+  let excludedCount = 0;
+
+  const lines = rawText.split(/\r?\n/);
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // Başlık satırlarını atla
+    if (/MENKUL\s+KIYMET|GRUP\s*\(%\)|HİSSE\s+SENETLERİ|GRUP\s+TOPLAMI|FON\s+PORTFÖY|B-\)HAZIR|C-\)ALACAK/i.test(trimmed)) continue;
+    if (trimmed.length < 10) continue;
+
+    let ticker: string | null = null;
+    let weight: number | null = null;
+    let companyName: string | null = null;
+
+    // Pipe'lı format (fetch_page markdown)
+    if (trimmed.includes('|')) {
+      const cells = trimmed.split('|').map((c) => c.trim()).filter(Boolean);
+      if (cells.length < 3) continue;
+      const first = cells[0].toUpperCase();
+      // Ticker 2-5 harf, sadece A-Z0-9
+      if (!/^[A-Z0-9]{2,5}$/.test(first)) continue;
+      ticker = first;
+      // Şirket adı genellikle 2. veya 3. hücrede değil, ama 2. hücrede olabilir
+      // Biz 2. hücreyi şirket adı olarak al (eğer TL değilse)
+      // Ağırlık: sondan 3. hücre GRUP (%)
+      // Örnek: [..., TOPLAM DEGER, GRUP, FPD, FTD]
+      // Son 4 hücre: değer, grup, fpd, ftd — grup = sondan 3.
+      if (cells.length >= 4) {
+        const grupStr = cells[cells.length - 3];
+        weight = parseNumTR(grupStr);
+      }
+      // Şirket adı: 2. hücre TL ise 3. hücre, değilse 1. hücre sonrası
+      if (cells.length >= 2) {
+        const second = cells[1];
+        if (second !== 'TL' && second.length > 3) companyName = second;
+        else if (cells.length >= 3) companyName = cells[2];
+      }
+    } else {
+      // Düz metin formatı: "DSTKF TL DESTEK FAKTORING ... 38,36 36,91 37,28"
+      // Ticker en başta
+      const firstTokenMatch = trimmed.match(/^([A-Z0-9]{2,5})\s+/);
+      if (!firstTokenMatch) continue;
+      const candidate = firstTokenMatch[1];
+      if (!/^[A-Z]{2,5}$/.test(candidate)) continue; // sadece harf olanlar hisse, AC2 gibi fonlar da olabilir ama atlamayalım
+      // Sayı içermeyen ve TL'den sonra gelen kısım şirket adı olabilir
+      ticker = candidate;
+
+      // Satır sonunda 3 adet yüzde var mı? Örn: "0,13 0,12 0,12" veya "38,36 36,91 37,28"
+      // Regex: son 3 sayı (virgüllü) satır sonunda
+      const tailMatch = trimmed.match(/(\d{1,3},\d{1,2})\s+(\d{1,3},\d{1,2})\s+(\d{1,3},\d{1,2})\s*$/);
+      if (tailMatch) {
+        weight = parseNumTR(tailMatch[1]); // GRUP ilk
+      } else {
+        // Bazen sadece 1 yüzde var: "0,13"
+        const singleTail = trimmed.match(/(\d{1,3},\d{1,2})\s*$/);
+        if (singleTail) weight = parseNumTR(singleTail[1]);
+      }
+
+      // Şirket adı: ticker ile ilk sayı bloğu arası
+      if (weight !== null) {
+        const withoutTicker = trimmed.slice(candidate.length).trim();
+        // İlk sayı bloğuna kadar olan kısım
+        const numStart = withoutTicker.search(/\d/);
+        if (numStart > 3) {
+          let namePart = withoutTicker.slice(0, numStart).trim();
+          // TL ve benzeri at
+          namePart = namePart.replace(/^\s*TL\s+/i, '').trim();
+          if (namePart.length >= 3 && namePart.length <= 80) companyName = namePart;
+        }
+      }
+    }
+
+    if (!ticker || weight === null) continue;
+    if (!Number.isFinite(weight)) continue;
+    if (weight < 0 || weight > 100) continue;
+    if (weight < MIN_IMPACT_PCT) { excludedCount++; continue; }
+
+    // Aynı ticker birden fazla lot → topla
+    const existing = holdingsMap.get(ticker);
+    if (existing) {
+      existing.weight += weight;
+      existing.count += 1;
+    } else {
+      holdingsMap.set(ticker, { name: companyName, weight, count: 1 });
+    }
+  }
+
+  const holdings: FundHolding[] = [];
+  holdingsMap.forEach((v, ticker) => {
+    holdings.push({
+      ticker,
+      name: v.name,
+      weightPct: Number(v.weight.toFixed(4)),
+      prevWeightPct: null,
+    });
+  });
+
+  holdings.sort((a, b) => b.weightPct - a.weightPct);
+
+  const { asOfDate, label } = extractReportDate(rawText);
+
+  return {
+    fundCode,
+    asOfDate,
+    reportLabel: label ?? (asOfDate ? `KAP PDF raporu (dönem sonu ${asOfDate})` : 'KAP PDF raporu'),
+    holdings,
+    excludedCount,
+    source: 'kap-pdf',
+  };
+}
+
+export function validateKapParsed(p: ParsedFundContent): { ok: boolean; reason: string | null } {
+  if (p.holdings.length === 0) return { ok: false, reason: 'hiç hisse bulunamadı (PDF metni okunamadı veya tablo formatı değişmiş)' };
+  const total = p.holdings.reduce((s, h) => s + h.weightPct, 0);
+  // KAP PDF'inde hisse senetleri grubu 100 değil, tüm fon 100. Hisse oranı %96 gibi olabilir.
+  // Bu yüzden 100 üstü hata, 1 altı hata, ama 50-100 arası OK (serbest fon)
+  if (total > 100.5) return { ok: false, reason: `ağırlık toplamı %${total.toFixed(2)} > 100 (parse hatası)` };
+  if (total < 1) return { ok: false, reason: `ağırlık toplamı %${total.toFixed(2)} < 1 (parse hatası)` };
+  return { ok: true, reason: null };
+}
+
+
+====================================================================
+FILE: lib/repo.ts
+====================================================================
+/**
+ * YATIRIM TERMİNALİ — SUPABASE VERİ ERİŞİM KATMANI (repo)
+ *
+ * P0 KURALI: SESSİZ YUTMA YASAK.
+ *  - supabase-js hata FIRLATMAZ, { data, error } döndürür. Bu yüzden her
+ *    yazma fonksiyonu `error` alanını kontrol eder ve sonucu { ok } olarak
+ *    GERİ DÖNDÜRÜR. UI bu sonucu kırmızı banner'da gösterir.
+ *  - Okuma (loadAll) başarısız olursa artık "connected" gibi görünmez:
+ *    { ok: false, error } döner ve UI 'db_error' durumuna geçer.
+ *  - Supabase yapılandırılmadıysa hiçbir şey "çalışıyor" gibi gösterilmez:
+ *    kind='setup' hatası döner.
+ *
+ * YAZMA HEDEFLERİ: her fonksiyon yalnızca kendi tablosuna yazar.
+ */
+
+import { supabase, isSupabaseConfigured } from './supabase';
+import {
+  Position, Decision, Transaction, CashMovement, SocialPrediction,
+  FundHoldingRow, RepoError, RepoErrorKind, WriteResult,
+} from './types';
+
+function enabled(): boolean {
+  return isSupabaseConfigured();
+}
+
+/* ------------------------------------------------------------------ */
+/* Hata yardımcıları                                                   */
+/* ------------------------------------------------------------------ */
+
+function setupError(operation: string): RepoError {
+  return {
+    kind: 'setup',
+    operation,
+    message: 'Supabase yapılandırılmadı (NEXT_PUBLIC_SUPABASE_URL / ANON_KEY eksik)',
+  };
+}
+
+/** Supabase hata nesnesini sınıflandır (RLS reddi / tablo yok / ağ). */
+export function classifySupabaseError(
+  operation: string,
+  err: { message?: string; code?: string; status?: number } | null
+): RepoError {
+  const message = err?.message ?? 'bilinmeyen veritabanı hatası';
+  const code = String(err?.code ?? '');
+  const status = typeof err?.status === 'number' ? err.status : null;
+  let kind: RepoErrorKind = 'unknown';
+  if (code === '42501' || /row-level security|row level security|permission denied/i.test(message)) kind = 'rls';
+  else if (code === '42P01' || /relation .* does not exist|could not find the table/i.test(message)) kind = 'not_found';
+  else if (status === 401 || status === 403 || /invalid.*token|jwt/i.test(message)) kind = 'rls';
+  else if (status === 0 || /fetch failed|network|timeout/i.test(message)) kind = 'network';
+  return { kind, operation, message };
+}
+
+function warn(op: string, error: RepoError): void {
+  // Kimlik bilgisi loglanmaz — yalnızca işlem adı, hata türü ve mesaj.
+  console.warn(`[repo] ${op} başarısız (${error.kind}): ${error.message}`);
+}
+
+/** supabase-js dönüş gövdesi (builder thenable'dır). */
+interface SupabaseResult {
+  error: { message?: string; code?: string; status?: number } | null;
+}
+
+/**
+ * Tek yazma deseni: `error` alanı kontrol edilir, hata varsa console.warn +
+ * { ok:false, error } döner. Başarılıysa { ok:true }.
+ */
+async function write(
+  operation: string,
+  fn: () => PromiseLike<SupabaseResult>
+): Promise<WriteResult> {
+  if (!enabled()) {
+    const e = setupError(operation);
+    warn(operation, e);
+    return { ok: false, error: e };
+  }
+  try {
+    const { error } = await fn();
+    if (error) {
+      const e = classifySupabaseError(operation, error);
+      warn(operation, e);
+      return { ok: false, error: e };
+    }
+    return { ok: true };
+  } catch (err) {
+    const e = classifySupabaseError(operation, {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    warn(operation, e);
+    return { ok: false, error: e };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Tipler                                                              */
+/* ------------------------------------------------------------------ */
+
+export interface DbBundle {
+  positions: Position[];
+  decisions: Decision[];
+  transactions: Transaction[];
+  cashMovements: CashMovement[];
+  predictions: SocialPrediction[];
+  fundHoldings: FundHoldingRow[];
+  proposals: FundHoldingProposal[];
+  cashBalance: number | null;
+  initialCapital: number | null;
+}
+
+export type LoadResult =
+  | { ok: true; bundle: DbBundle }
+  | { ok: false; error: RepoError };
+
+/* ------------------------------------------------------------------ */
+/* OKUMA                                                               */
+/* ------------------------------------------------------------------ */
+
+export async function loadAll(): Promise<LoadResult> {
+  if (!enabled()) return { ok: false, error: setupError('loadAll') };
+  try {
+    const [posRes, decRes, txnRes, cashRes, predRes, fundRes, propRes, balRes, setRes] = await Promise.all([
+      supabase.from('portfolio_positions').select('*').order('symbol'),
+      supabase.from('execution_decisions').select('*').order('created_at'),
+      supabase.from('transactions').select('*').order('created_at', { ascending: false }),
+      supabase.from('cash_ledger').select('*').order('created_at', { ascending: false }),
+      supabase.from('social_predictions').select('*').order('prediction_date', { ascending: false }),
+      supabase.from('fund_holdings').select('*').order('fund_code').order('weight_pct', { ascending: false }),
+      supabase.from('fund_holding_proposals').select('*').eq('status', 'pending').order('detected_at', { ascending: false }),
+      supabase.from('cash_ledger').select('balance_after').order('created_at', { ascending: false }).limit(1),
+      supabase.from('app_settings').select('key, value').eq('key', 'initial_capital'),
+    ]);
+
+    // ÇEKİRDEK tablolar: hata varsa yükleme BAŞARISIZ sayılır (sessiz devam yok).
+    const core = [
+      ['portfolio_positions', posRes], ['execution_decisions', decRes],
+      ['transactions', txnRes], ['cash_ledger', cashRes], ['social_predictions', predRes],
+    ] as const;
+    for (const [table, res] of core) {
+      if (res.error) {
+        const error = classifySupabaseError(`loadAll:${table}`, res.error);
+        warn(`loadAll:${table}`, error);
+        return { ok: false, error };
+      }
+    }
+
+    // fund_holdings: v3.2 migration'ı henüz çalıştırılmamış olabilir → yüklemeyi
+    // engellemez ama hata GİZLENMEZ (console + UI ipucu).
+    let fundHoldings: FundHoldingRow[] = [];
+    if (fundRes.error) {
+      const error = classifySupabaseError('loadAll:fund_holdings', fundRes.error);
+      console.warn(
+        `[repo] fund_holdings okunamadı (${error.kind}): ${error.message} — ` +
+        'supabase/supabase_fund_holdings_migration.sql çalıştırıldı mı?'
+      );
+    } else {
+      fundHoldings = ((fundRes.data as any[]) ?? []).map((r) => ({
+        id: r.id,
+        fund_code: r.fund_code,
+        ticker: r.ticker,
+        company_name: r.company_name ?? null,
+        weight_pct: Number(r.weight_pct),
+        as_of_date: String(r.as_of_date ?? '').slice(0, 10),
+        source: ['manual', 'calibration', 'kap-pdf'].includes(r.source) ? r.source : 'auto',
+        notes: r.notes ?? null,
+      }));
+    }
+
+    // fund_holding_proposals: v3.4 migration henüz çalıştırılmamış olabilir → sessiz.
+    let proposals: FundHoldingProposal[] = [];
+    if (propRes.error) {
+      console.warn(`[repo] fund_holding_proposals okunamadı: ${propRes.error.message} — supabase_fund_proposals_migration.sql çalıştırıldı mı?`);
+    } else {
+      proposals = ((propRes.data as any[]) ?? []).map((r) => ({
+        id: r.id,
+        fund_code: r.fund_code,
+        ticker: r.ticker,
+        weight_pct: Number(r.weight_pct),
+        prev_weight_pct: r.prev_weight_pct != null ? Number(r.prev_weight_pct) : null,
+        source_tweet_id: r.source_tweet_id ?? null,
+        predictor_handle: r.predictor_handle ?? null,
+        raw_text: r.raw_text ?? null,
+        detected_at: r.detected_at,
+        status: r.status,
+      }));
+    }
+
+    const positions: Position[] = ((posRes.data as any[]) ?? []).map((r) => ({
+      id: r.id,
+      symbol: r.symbol,
+      asset_name: r.asset_name,
+      asset_type: r.asset_type,
+      quantity: Number(r.quantity),
+      unit_cost: Number(r.unit_cost),
+      target_price: r.target_price != null ? Number(r.target_price) : undefined,
+      stop_price: r.stop_price != null ? Number(r.stop_price) : undefined,
+      risk_score: r.risk_score ?? 5,
+      current_action: r.current_action ?? 'TUT',
+      rationale: r.rationale ?? '',
+      is_active: true,
+    }));
+
+    const decisions: Decision[] = ((decRes.data as any[]) ?? []).map((r) => ({
+      id: r.id,
+      symbol: r.symbol,
+      action_type: r.action_type,
+      status: r.status,
+      target_price: r.target_price != null ? Number(r.target_price) : undefined,
+      stop_price: r.stop_price != null ? Number(r.stop_price) : undefined,
+      risk_score: r.risk_score ?? 5,
+      details: r.details ?? '',
+      created_at: (r.created_at ?? '').slice(0, 10),
+    }));
+
+    const transactions: Transaction[] = ((txnRes.data as any[]) ?? []).map((r) => ({
+      id: r.id,
+      symbol: r.symbol,
+      transaction_type: r.transaction_type,
+      quantity: Number(r.quantity),
+      unit_price: Number(r.unit_price),
+      total_amount: Number(r.total_amount),
+      withholding_tax: Number(r.withholding_tax ?? 0),
+      net_amount: Number(r.net_amount),
+      realized_pnl: Number(r.realized_pnl ?? 0),
+      notes: r.notes ?? undefined,
+      created_at: r.created_at,
+    }));
+
+    const cashMovements: CashMovement[] = ((cashRes.data as any[]) ?? []).map((r) => ({
+      id: r.id,
+      movement_type: r.movement_type,
+      amount: Number(r.amount),
+      balance_after: Number(r.balance_after),
+      description: r.description ?? '',
+      category: r.movement_type,
+      created_at: r.created_at,
+    }));
+
+    const predictions: SocialPrediction[] = ((predRes.data as any[]) ?? []).map((r) => ({
+      id: r.id,
+      predictor_handle: r.predictor_handle,
+      fund_code: r.fund_code,
+      predicted_return_pct: r.predicted_return_pct != null ? Number(r.predicted_return_pct) : null,
+      prediction_category: r.prediction_category ?? 'GUNLUK_GETIRI',
+      raw_text: r.raw_text ?? '',
+      prediction_date: r.prediction_date,
+      actual_return_pct: r.actual_return_pct != null ? Number(r.actual_return_pct) : undefined,
+      accuracy_score: r.accuracy_score != null ? Number(r.accuracy_score) : undefined,
+      status: r.status ?? 'BEKLIYOR',
+    }));
+
+    const cashBalance = balRes.data?.[0] != null ? Number((balRes.data as any[])[0].balance_after) : null;
+    const initialCapital = setRes.data?.[0] != null ? Number((setRes.data as any[])[0].value) : null;
+
+    return {
+      ok: true,
+      bundle: { positions, decisions, transactions, cashMovements, predictions, fundHoldings, proposals, cashBalance, initialCapital },
+    };
+  } catch (err) {
+    const error = classifySupabaseError('loadAll', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    warn('loadAll', error);
+    return { ok: false, error };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* YAZMA — hepsi { ok } döndürür; sessiz yutma yok                     */
+/* ------------------------------------------------------------------ */
+
+export function upsertPosition(p: Position): Promise<WriteResult> {
+  return write('upsertPosition', () =>
+    supabase.from('portfolio_positions').upsert(
+      {
+        symbol: p.symbol,
+        asset_name: p.asset_name,
+        asset_type: p.asset_type,
+        quantity: p.quantity,
+        unit_cost: p.unit_cost,
+        target_price: p.target_price ?? null,
+        stop_price: p.stop_price ?? null,
+        risk_score: p.risk_score,
+        current_action: p.current_action,
+        rationale: p.rationale,
+      },
+      { onConflict: 'symbol' }
+    )
+  );
+}
+
+export function upsertDecision(d: Decision): Promise<WriteResult> {
+  return write('upsertDecision', () =>
+    supabase.from('execution_decisions').upsert(
+      {
+        id: d.id,
+        symbol: d.symbol,
+        action_type: d.action_type,
+        status: d.status,
+        target_price: d.target_price ?? null,
+        stop_price: d.stop_price ?? null,
+        risk_score: d.risk_score,
+        details: d.details,
+        created_at: d.created_at,
+      },
+      { onConflict: 'id' }
+    )
+  );
+}
+
+export function insertTransaction(t: Transaction): Promise<WriteResult> {
+  return write('insertTransaction', () =>
+    supabase.from('transactions').insert({
+      symbol: t.symbol,
+      transaction_type: t.transaction_type,
+      quantity: t.quantity,
+      unit_price: t.unit_price,
+      total_amount: t.total_amount,
+      withholding_tax: t.withholding_tax,
+      net_amount: t.net_amount,
+      realized_pnl: t.realized_pnl,
+      notes: t.notes ?? null,
+      created_at: t.created_at,
+    })
+  );
+}
+
+export function insertCashMovement(m: CashMovement): Promise<WriteResult> {
+  return write('insertCashMovement', () =>
+    supabase.from('cash_ledger').insert({
+      movement_type: m.movement_type,
+      amount: m.amount,
+      balance_after: m.balance_after,
+      description: m.description,
+      created_at: m.created_at,
+    })
+  );
+}
+
+export function insertPrediction(p: SocialPrediction): Promise<WriteResult> {
+  return write('insertPrediction', () =>
+    supabase.from('social_predictions').insert({
+      predictor_handle: p.predictor_handle,
+      fund_code: p.fund_code,
+      predicted_return_pct: p.predicted_return_pct,
+      prediction_category: p.prediction_category,
+      raw_text: p.raw_text,
+      prediction_date: p.prediction_date,
+      actual_return_pct: p.actual_return_pct ?? null,
+      accuracy_score: p.accuracy_score ?? null,
+      status: p.status,
+    })
+  );
+}
+
+export function updatePrediction(p: SocialPrediction): Promise<WriteResult> {
+  // local id uuid değilse (Date.now tabanlı) symbol+tarih+metin ile yakala
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const patch = {
+    actual_return_pct: p.actual_return_pct ?? null,
+    accuracy_score: p.accuracy_score ?? null,
+    status: p.status,
+  };
+  return write('updatePrediction', () =>
+    uuidRe.test(p.id)
+      ? supabase.from('social_predictions').update(patch).eq('id', p.id)
+      : supabase.from('social_predictions').update(patch).eq('raw_text', p.raw_text).eq('fund_code', p.fund_code)
+  );
+}
+
+export function setInitialCapital(value: number): Promise<WriteResult> {
+  return write('setInitialCapital', () =>
+    supabase.from('app_settings').upsert({ key: 'initial_capital', value: String(value) })
+  );
+}
+
+export function saveDailySnapshot(
+  date: string,
+  totalValue: number,
+  cashBalance: number,
+  breakdown: Record<string, number>
+): Promise<WriteResult> {
+  return write('saveDailySnapshot', () =>
+    supabase.from('portfolio_snapshots').upsert(
+      { snapshot_date: date, total_value: totalValue, cash_balance: cashBalance, breakdown },
+      { onConflict: 'snapshot_date' }
+    )
+  );
+}
+
+/* --------------------- Fon içeriği (yalnız fund_holdings) ---------- */
+
+export interface FundHoldingDraft {
+  fund_code: string;
+  ticker: string;
+  company_name?: string | null;
+  weight_pct: number;
+  as_of_date: string;
+  notes?: string | null;
+}
+
+/** Manuel override: source='manual' — otomatik sync job'u bu satırı asla ezmez. */
+export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
+  return write('upsertFundHolding', () =>
+    supabase.from('fund_holdings').upsert(
+      {
+        fund_code: h.fund_code,
+        ticker: h.ticker,
+        company_name: h.company_name ?? null,
+        weight_pct: h.weight_pct,
+        as_of_date: h.as_of_date,
+        source: 'manual',
+        notes: h.notes ?? 'manuel override (UI)',
+      },
+      { onConflict: 'fund_code,ticker' }
+    )
+  );
+}
+
+/** KAP PDF — ana veri kaynağı (ham veri, onay gerektirmez, sync ezmez) */
+export function upsertFundHoldingKapPdf(h: FundHoldingDraft): Promise<WriteResult> {
+  return write('upsertFundHoldingKapPdf', () =>
+    supabase.from('fund_holdings').upsert(
+      {
+        fund_code: h.fund_code,
+        ticker: h.ticker,
+        company_name: h.company_name ?? null,
+        weight_pct: h.weight_pct,
+        as_of_date: h.as_of_date,
+        source: 'kap-pdf',
+        notes: h.notes ?? 'KAP PDF (ana kaynak, ham veri)',
+      },
+      { onConflict: 'fund_code,ticker' }
+    )
+  );
+}
+
+/** Otomatik araştırma: source='auto' — sync job'u ezebilir, manuel/kap-pdf değil. */
+export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 'fintables' | 'rotaborsa' | 'kap-pdf' }): Promise<WriteResult> {
+  return write('upsertFundHoldingAuto', () =>
+    supabase.from('fund_holdings').upsert(
+      {
+        fund_code: h.fund_code,
+        ticker: h.ticker,
+        company_name: h.company_name ?? null,
+        weight_pct: h.weight_pct,
+        as_of_date: h.as_of_date,
+        source: (h as any).source ?? 'auto',
+        notes: h.notes ?? 'otomatik araştırma (fintables/rotaborsa)',
+      },
+      { onConflict: 'fund_code,ticker' }
+    )
+  );
+}
+
+export function deleteFundHolding(id: string): Promise<WriteResult> {
+  return write('deleteFundHolding', () =>
+    supabase.from('fund_holdings').delete().eq('id', id)
+  );
+}
+
+/* --------------------- Fon içeriği önerileri (Twitter foto OCR + onay) ---------- */
+
+export interface FundHoldingProposal {
+  id: string;
+  fund_code: string;
+  ticker: string;
+  weight_pct: number;
+  prev_weight_pct?: number | null;
+  source_tweet_id?: string | null;
+  predictor_handle?: string | null;
+  raw_text?: string | null;
+  detected_at?: string;
+  status: 'pending' | 'approved' | 'rejected';
+}
+
+export async function loadProposals(): Promise<FundHoldingProposal[]> {
+  if (!enabled()) return [];
+  try {
+    const { data, error } = await supabase.from('fund_holding_proposals').select('*').eq('status', 'pending').order('detected_at', { ascending: false });
+    if (error || !data) return [];
+    return (data as any[]).map((r) => ({
+      id: r.id,
+      fund_code: r.fund_code,
+      ticker: r.ticker,
+      weight_pct: Number(r.weight_pct),
+      prev_weight_pct: r.prev_weight_pct != null ? Number(r.prev_weight_pct) : null,
+      source_tweet_id: r.source_tweet_id ?? null,
+      predictor_handle: r.predictor_handle ?? null,
+      raw_text: r.raw_text ?? null,
+      detected_at: r.detected_at,
+      status: r.status,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function approveProposal(id: string): Promise<WriteResult> {
+  return write('approveProposal', () =>
+    supabase.from('fund_holding_proposals').update({ status: 'approved' }).eq('id', id)
+  );
+}
+
+export function rejectProposal(id: string): Promise<WriteResult> {
+  return write('rejectProposal', () =>
+    supabase.from('fund_holding_proposals').update({ status: 'rejected' }).eq('id', id)
+  );
+}
+
+
+
+====================================================================
+FILE: scripts/fund_holdings/sync.ts
+====================================================================
+/**
+ * fund_holdings/sync.ts — GitHub Actions job'u: fon hisse içeriklerini çeker,
+ * parse eder ve YALNIZCA fund_holdings tablosuna yazar.
+ *
+ * KURALLAR:
+ *  - Tek yazı hedefi: fund_holdings (history'yi trigger doldurur; calibration_log dokunulmaz).
+ *  - source='manual' satırlar ASLA ezilmez (kullanıcı override'ı üstündür).
+ *  - KAYBOLAN hisseler (raporda olmayan, source='auto') silinir.
+ *  - Log'da hiçbir secret/cookie YOK — yalnızca özet.
+ *
+ * Çalıştırma:
+ *   - Actions: otomatik (fund-holdings-sync.yml) veya workflow_dispatch
+ *   - Yerel test: DRY_RUN=1 npx tsx scripts/fund_holdings/sync.ts
+ *     (SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY DRY_RUN'da GEREKLİ DEĞİL)
+ */
+import { readFileSync } from 'node:fs';
+import { createClient } from '@supabase/supabase-js';
+import {
+  FUND_SOURCES,
+  parseFintablesHoldings,
+  parseRotaborsaHoldings,
+  toHoldingRows,
+  validateParsed,
+  type FundSourceConfig,
+} from '../../lib/fundHoldings';
+
+const DRY_RUN = process.env.DRY_RUN === '1';
+const FIXTURE_DIR = process.env.FIXTURE_DIR ?? ''; // ör. ./test/fixtures → {CODE}.html oku
+const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+
+if (!DRY_RUN && (!SUPABASE_URL || !SERVICE_KEY)) {
+  console.error('HATA: SUPABASE_URL ve SUPABASE_SERVICE_ROLE_KEY gerekli (ya da DRY_RUN=1 ile çalıştır).');
+  process.exit(1);
+}
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+async function fetchHtml(url: string, fundCode: string): Promise<string> {
+  if (FIXTURE_DIR) {
+    const p = `${FIXTURE_DIR}/${fundCode}.html`;
+    return readFileSync(p, 'utf-8');
+  }
+  const res = await fetch(url, {
+    headers: { 'user-agent': UA, accept: 'text/html' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+  return res.text();
+}
+
+async function loadFund(cfg: FundSourceConfig): Promise<{ rows: ReturnType<typeof toHoldingRows> } | null> {
+  if (!cfg.url) return null; // KGM/TP2: hisse içeriği bu job'da takip edilmez
+  const html = await fetchHtml(cfg.url, cfg.code);
+  const parsed = cfg.kind === 'rotaborsa'
+    ? parseRotaborsaHoldings(html, cfg.code)
+    : parseFintablesHoldings(html, cfg.code);
+
+  const v = validateParsed(parsed);
+  if (!v.ok) {
+    console.error(`HATA [${cfg.code}]: parse doğrulaması geçmedi → ${v.reason}. Bu fon bu turda GÜNCELLENMEDİ (eski değerler korunur).`);
+    return null;
+  }
+  return { rows: toHoldingRows(parsed) };
+}
+
+async function main(): Promise<void> {
+  const funds = FUND_SOURCES.filter((f) => f.url !== null);
+  const loaded = new Map<string, ReturnType<typeof toHoldingRows>>();
+
+  for (const cfg of funds) {
+    try {
+      const r = await loadFund(cfg);
+      if (r) {
+        loaded.set(cfg.code, r.rows);
+        const total = r.rows.reduce((s, x) => s + x.weight_pct, 0);
+        console.log(`OK [${cfg.code}]: ${r.rows.length} hisse, ağırlık toplamı %${total.toFixed(2)}, dönem=${r.rows[0]?.as_of_date}`);
+      }
+    } catch (e) {
+      console.error(`HATA [${cfg.code}]: ${e instanceof Error ? e.message : String(e)}. Bu fon bu turda GÜNCELLENMEDİ.`);
+    }
+  }
+
+  if (loaded.size === 0) {
+    console.error('ÖZET: hiçbir fon güncellenemedi (kaynaklara ulaşılamadı veya parse hatası).');
+    process.exit(1);
+  }
+
+  if (DRY_RUN) {
+    console.log('\n=== DRY_RUN (yazı YAPILMADI) — INSERT/UPDATE edecek satırlar: ===');
+    loaded.forEach((rows, code) => {
+      console.log(`\n[${code}]`);
+      rows.forEach((r) => {
+        console.log(`  ${r.ticker.padEnd(6)} %${r.weight_pct.toFixed(2).padStart(7)}  ${r.company_name ?? ''}`);
+      });
+    });
+    console.log('\nÖZET: DRY_RUN tamam. Gerçek yazı için SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY ortamında çalıştır.');
+    return;
+  }
+
+  const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
+
+  let inserted = 0;
+  let deleted = 0;
+  let skippedManual = 0;
+
+  // KAP PDF tazelik eşikleri: fon yöneticisi günlük trade yapabildiği için
+  // KAP PDF taze iken koru, bayatlayınca auto kaynakların overwrite etmesine izin ver
+  // TLY haftalık rapor → 7 gün, THF aylık → 30 gün, diğerleri 45 gün
+  const KAP_FRESH_DAYS: Record<string, number> = { TLY: 7, THF: 30 };
+  const DEFAULT_FRESH = 45;
+
+  for (const [fundCode, rows] of Array.from(loaded.entries())) {
+    const tickers = rows.map((r) => r.ticker);
+
+    const { data: existing } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('fund_code', fundCode);
+
+    // En güncel kap-pdf tarihini bul ve yaşını hesapla
+    const kapRows = (existing ?? []).filter((e) => e.source === 'kap-pdf' && e.as_of_date);
+    let latestKapDate: Date | null = null;
+    for (const e of kapRows) {
+      const d = new Date(e.as_of_date);
+      if (!Number.isNaN(d.getTime()) && (!latestKapDate || d > latestKapDate)) latestKapDate = d;
+    }
+    const now = new Date();
+    const kapAgeDays = latestKapDate ? (now.getTime() - latestKapDate.getTime()) / (1000 * 60 * 60 * 24) : Infinity;
+    const freshThreshold = KAP_FRESH_DAYS[fundCode] ?? DEFAULT_FRESH;
+    const isKapFresh = kapAgeDays <= freshThreshold;
+
+    // Korunan ticker'lar: manual ve calibration ASLA ezilmez.
+    // kap-pdf: sadece taze iken korunur (günlük trade için bayatlayınca auto overwrite izni)
+    const protectedTickers = new Set<string>();
+    for (const e of existing ?? []) {
+      if (e.source === 'manual' || e.source === 'calibration') protectedTickers.add(e.ticker);
+      else if (e.source === 'kap-pdf' && isKapFresh) protectedTickers.add(e.ticker);
+    }
+    const autoRows = rows.filter((r) => !protectedTickers.has(r.ticker));
+    skippedManual += protectedTickers.size;
+
+    if (kapRows.length > 0) {
+      console.log(
+        `INFO [${fundCode}]: KAP PDF son tarih ${latestKapDate?.toISOString().slice(0, 10) ?? 'yok'} (${kapAgeDays.toFixed(1)} gün önce), eşik ${freshThreshold} gün → ${isKapFresh ? 'TAZE (korunuyor)' : 'BAYAT (auto overwrite izni)'}`
+      );
+    } else {
+      console.log(`INFO [${fundCode}]: KAP PDF yok, auto tam yetki`);
+    }
+
+    // 2) Upsert (fund_code + ticker anahtarı)
+    if (autoRows.length > 0) {
+      const { error } = await supabase
+        .from('fund_holdings')
+        .upsert(autoRows, { onConflict: 'fund_code,ticker' });
+      if (error) throw new Error(`[${fundCode}] upsert hatası: ${error.message}`);
+      inserted += autoRows.length;
+    }
+
+    // 3) Rapor ortadan kalkan satırları sil
+    //    - manual ve calibration ASLA silinmez
+    //    - kap-pdf: taze ise silinmez, bayat ise ve yeni raporda yoksa silinebilir (satılmış)
+    const keepSet = new Set(tickers);
+    const stale = (existing ?? []).filter((e) => {
+      if (protectedTickers.has(e.ticker)) return false; // korunanlar silinmez
+      return !keepSet.has(e.ticker);
+    });
+    if (stale.length > 0) {
+      const { error } = await supabase
+        .from('fund_holdings')
+        .delete()
+        .eq('fund_code', fundCode)
+        .in('ticker', stale.map((s) => s.ticker));
+      if (error) throw new Error(`[${fundCode}] stale silme hatası: ${error.message}`);
+      deleted += stale.length;
+    }
+  }
+
+  console.log(`\nÖZET: ${inserted} satır yazıldı, ${deleted} eski satır silindi, ${skippedManual} manuel/KAP-PDF override korundu (KAP ana kaynak).`);
+}
+
+main().catch((e) => {
+  console.error(`FATAL: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+  process.exit(1);
+});
+
+
+====================================================================
+FILE: scripts/fund_holdings/kap_pdf_fetch.py
+====================================================================
+#!/usr/bin/env python3
+"""
+KAP PDF otomatik çekme — TLY ve THF Portföy Dağılım Raporları
+
+- kap-client kullanarak KAP'tan son Portföy Dağılım Raporlarını çeker
+- PDF'leri data/kap_pdfs/ klasörüne indirir
+- Java serialization wrapper'ı çözer (KAP API quirki)
+- Sonra Node tarafında kap_pdf_upsert.ts ile parse edilip Supabase'e yazılır
+
+Çalıştırma:
+  pip install kap-client httpx
+  python scripts/fund_holdings/kap_pdf_fetch.py
+
+GitHub Actions: kap-pdf-sync.yml içinde otomatik çalışır
+"""
+
+import os
+import sys
+import struct
+from pathlib import Path
+from datetime import datetime
+
+# KAP client import - yoksa uyar
+try:
+    from kap_client import Kap, FundGroup, FundSubject
+except ImportError:
+    print("HATA: kap-client yüklü değil. pip install kap-client")
+    sys.exit(1)
+
+import httpx
+
+DATA_DIR = Path("data/kap_pdfs")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+TARGET_FUNDS = ["TLY", "THF"]
+DAYS_BACK = 30  # son 30 günde yayınlanan raporlar
+
+def extract_pdf_from_java_bytes(raw: bytes) -> bytes:
+    """
+    KAP /tr/api/file/download/{objId} endpoint'i Java-serialized byte[] döndürür
+    Format: AC ED 00 05 75 ... 78 70 <4 byte len> <PDF bytes>
+    """
+    try:
+        # Java serialization magic AC ED 00 05 kontrol
+        if raw[:4] == b'\xac\xed\x00\x05':
+            idx = raw.find(b'\x78\x70', 10)
+            if idx != -1 and idx + 6 <= len(raw):
+                arr_len = struct.unpack('>I', raw[idx+2:idx+6])[0]
+                pdf_bytes = raw[idx+6:idx+6+arr_len]
+                if pdf_bytes.startswith(b'%PDF'):
+                    return pdf_bytes
+                # Fallback: PDF header ara
+                pdf_start = raw.find(b'%PDF')
+                if pdf_start != -1:
+                    return raw[pdf_start:]
+        # Zaten düz PDF ise
+        if raw.startswith(b'%PDF'):
+            return raw
+        # Son çare: içinde %PDF ara
+        pdf_start = raw.find(b'%PDF')
+        if pdf_start != -1:
+            return raw[pdf_start:]
+        return raw
+    except Exception as e:
+        print(f"  Java unwrap hatası: {e}, ham boyutu {len(raw)}")
+        return raw
+
+def download_attachment(url: str, dest: Path) -> bool:
+    headers = {
+        "Referer": "https://www.kap.org.tr/tr/bildirim-sorgu",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    try:
+        with httpx.Client(timeout=30, headers=headers, follow_redirects=True) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            raw = resp.content
+            pdf_bytes = extract_pdf_from_java_bytes(raw)
+            if not pdf_bytes.startswith(b'%PDF'):
+                print(f"  UYARI: indirilen dosya PDF değil (ilk 20 byte: {pdf_bytes[:20]})")
+                # Yine de kaydet, belki parse edilir
+            dest.write_bytes(pdf_bytes)
+            print(f"  İndirildi: {dest} ({len(pdf_bytes)} byte)")
+            return True
+    except Exception as e:
+        print(f"  İndirme hatası {url}: {e}")
+        return False
+
+def main():
+    print(f"=== KAP PDF Fetch — {datetime.now().isoformat()} ===")
+    print(f"Hedef fonlar: {TARGET_FUNDS}, son {DAYS_BACK} gün")
+
+    fetched = []
+
+    with Kap() as kap:
+        # Fon listesini çek (Yatırım Fonları)
+        print("Fon listesi çekiliyor (YF)...")
+        try:
+            funds = kap.fetch_funds(FundGroup.YATIRIM_FONLARI)
+        except Exception as e:
+            print(f"HATA: fon listesi alınamadı: {e}")
+            sys.exit(1)
+
+        fund_map = {f.code: f for f in funds}
+        print(f"Toplam {len(funds)} YF fon bulundu")
+
+        for code in TARGET_FUNDS:
+            fund = fund_map.get(code)
+            if not fund:
+                print(f"UYARI: {code} fonu listede yok, atlanıyor")
+                continue
+
+            print(f"\n[{code}] OID={fund.oid} için Portföy Dağılım Raporu aranıyor...")
+            try:
+                disclosures = kap.fetch_fund_disclosures_by_filter(
+                    fund_oid=fund.oid,
+                    subject_oid=FundSubject.PORTFOY_DAGILIM_RAPORU.value,
+                    days=DAYS_BACK,
+                )
+            except Exception as e:
+                print(f"  HATA: disclosure fetch: {e}")
+                continue
+
+            if not disclosures:
+                print(f"  Sonuç yok (son {DAYS_BACK} günde rapor yayınlanmamış olabilir)")
+                continue
+
+            print(f"  {len(disclosures)} rapor bulundu, en yeni 3 gösteriliyor:")
+            for d in disclosures[:3]:
+                print(f"    - {d.publish_datetime} | {d.subject} | idx={d.index}")
+
+            # En yeni raporu al
+            latest = disclosures[0]
+            print(f"  En yeni: {latest.publish_datetime} — {latest.subject}")
+
+            try:
+                attachments = kap.fetch_attachments(latest.index)
+            except Exception as e:
+                print(f"  Attachment fetch hatası: {e}")
+                continue
+
+            if not attachments:
+                print(f"  Attachment yok")
+                continue
+
+            for att in attachments:
+                # Sadece PDF'leri al
+                if not att.filename.lower().endswith('.pdf'):
+                    continue
+                # Dosya adı: TLY_2026_08.pdf gibi
+                safe_name = f"{code}_{latest.publish_datetime.strftime('%Y_%m_%d')}_{att.filename}"
+                dest = DATA_DIR / safe_name
+                # Zaten varsa atla (aynı gün)
+                if dest.exists() and dest.stat().st_size > 1000:
+                    print(f"  Zaten var, atlanıyor: {dest}")
+                    fetched.append(str(dest))
+                    continue
+
+                print(f"  İndiriliyor: {att.filename} → {att.url}")
+                if download_attachment(att.url, dest):
+                    fetched.append(str(dest))
+
+    print(f"\n=== ÖZET ===")
+    print(f"İndirilen/yeni: {len(fetched)} dosya")
+    for f in fetched:
+        print(f"  {f}")
+
+    # GitHub Actions için output
+    if fetched:
+        # Son indirilenleri bir dosyaya yaz (sonraki adım için)
+        Path("data/kap_pdfs/latest.txt").write_text("\n".join(fetched))
+        print(f"\nlatest.txt yazıldı")
+
+    # Başarı: en az 1 dosya veya hiç yeni rapor yoksa da OK (KAP haftalık)
+    print("\nKAP PDF fetch tamamlandı")
+
+if __name__ == "__main__":
+    main()
+
+
+====================================================================
+FILE: scripts/fund_holdings/kap_pdf_upsert.ts
+====================================================================
+/**
+ * KAP PDF upsert — data/kap_pdfs/ klasöründeki PDF'leri parse edip
+ * fund_holdings tablosuna source='kap-pdf' olarak yazar.
+ *
+ * Akış:
+ *   1. kap_pdf_fetch.py ile PDF'ler indirilir (veya manuel upload)
+ *   2. Bu script PDF'leri pdf-parse ile metne çevirir
+ *   3. lib/kapPdfParser.ts ile holdings çıkarılır
+ *   4. Supabase'e upsert (kap-pdf, ham veri, onay yok)
+ *
+ * Çalıştırma:
+ *   DRY_RUN=1 npx tsx scripts/fund_holdings/kap_pdf_upsert.ts
+ *   SUPABASE_URL + SERVICE_ROLE_KEY ile gerçek yazı
+ *
+ * KAP PDF ana kaynak: fon yöneticisi günlük trade yapabilir ama KAP PDF
+ * en doğru resmi veri. Bu yüzden:
+ *   - KAP PDF taze ise (TLY 7 gün, THF 30 gün) auto kaynaklar overwrite edemez
+ *   - Bayatlayınca auto kaynaklar overwrite edebilir (günlük trade takibi)
+ */
+
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { createClient } from '@supabase/supabase-js';
+import { parseKapPdfHoldings, validateKapParsed } from '../../lib/kapPdfParser';
+import { toHoldingRows } from '../../lib/fundHoldings';
+
+const DRY_RUN = process.env.DRY_RUN === '1';
+const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+const PDF_DIR = process.env.PDF_DIR ?? 'data/kap_pdfs';
+
+if (!DRY_RUN && (!SUPABASE_URL || !SERVICE_KEY)) {
+  console.error('HATA: SUPABASE_URL ve SUPABASE_SERVICE_ROLE_KEY gerekli (ya da DRY_RUN=1)');
+  process.exit(1);
+}
+
+async function parsePdfFile(filePath: string): Promise<{ text: string; fundCode: string }> {
+  // Dosya adından fon kodunu çıkar: TLY_2026_08_05_...pdf veya THF_...
+  const base = filePath.split('/').pop() ?? filePath;
+  const m = base.match(/^(TLY|THF|[A-Z0-9]{2,5})[_-]/i);
+  const fundCode = m ? m[1].toUpperCase() : 'TLY';
+
+  const buffer = readFileSync(filePath);
+  // @ts-ignore
+  const pdfParse = (await import('pdf-parse')).default as any;
+  const data = await pdfParse(buffer);
+  const text: string = data.text || '';
+  if (!text || text.trim().length < 100) {
+    throw new Error(`PDF metni okunamadı (taranmış olabilir): ${filePath}`);
+  }
+  return { text, fundCode };
+}
+
+async function main() {
+  console.log(`=== KAP PDF Upsert — ${new Date().toISOString()} ===`);
+  console.log(`PDF_DIR=${PDF_DIR}, DRY_RUN=${DRY_RUN}`);
+
+  if (!existsSync(PDF_DIR)) {
+    console.error(`HATA: ${PDF_DIR} klasörü yok. Önce kap_pdf_fetch.py çalıştır veya manuel PDF koy.`);
+    process.exit(1);
+  }
+
+  const files = readdirSync(PDF_DIR)
+    .filter((f) => f.toLowerCase().endsWith('.pdf'))
+    .map((f) => join(PDF_DIR, f));
+
+  if (files.length === 0) {
+    console.log('PDF yok, yapılacak iş yok (KAP bu hafta rapor yayınlamamış olabilir)');
+    return;
+  }
+
+  console.log(`${files.length} PDF bulundu`);
+
+  const allRows: ReturnType<typeof toHoldingRows>[] = [];
+  const meta: { fundCode: string; asOfDate: string | null; label: string | null; count: number; file: string }[] = [];
+
+  for (const file of files) {
+    try {
+      const { text, fundCode } = await parsePdfFile(file);
+      const parsed = parseKapPdfHoldings(text, fundCode);
+      const v = validateKapParsed(parsed);
+      if (!v.ok) {
+        console.error(`HATA [${file}]: ${v.reason} — atlanıyor`);
+        continue;
+      }
+      const rows = toHoldingRows(parsed).map((r) => ({
+        ...r,
+        source: 'kap-pdf' as const,
+        notes: `${parsed.reportLabel ?? 'KAP PDF'} | ${file.split('/').pop()} (auto KAP fetch, ana kaynak)`,
+      }));
+      const total = rows.reduce((s, r) => s + r.weight_pct, 0);
+      console.log(`OK [${fundCode}] ${file}: ${rows.length} hisse, toplam %${total.toFixed(2)}, dönem=${parsed.asOfDate}`);
+      allRows.push(rows);
+      meta.push({ fundCode, asOfDate: parsed.asOfDate, label: parsed.reportLabel, count: rows.length, file });
+    } catch (e) {
+      console.error(`HATA [${file}]: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (allRows.length === 0) {
+    console.error('ÖZET: hiçbir PDF parse edilemedi');
+    process.exit(1);
+  }
+
+  // DRY_RUN ise sadece logla
+  if (DRY_RUN) {
+    console.log('\n=== DRY_RUN — yazı yapılmadı ===');
+    for (const rows of allRows) {
+      const code = rows[0]?.fund_code ?? '?';
+      console.log(`\n[${code}] ${rows.length} satır:`);
+      for (const r of rows.slice(0, 10)) {
+        console.log(`  ${r.ticker.padEnd(6)} %${r.weight_pct.toFixed(2).padStart(7)} ${r.company_name ?? ''}`);
+      }
+      if (rows.length > 10) console.log(`  ... ve ${rows.length - 10} daha`);
+    }
+    return;
+  }
+
+  const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
+
+  let upserted = 0;
+  for (const rows of allRows) {
+    if (rows.length === 0) continue;
+    const fundCode = rows[0].fund_code;
+    // Upsert
+    const { error } = await supabase.from('fund_holdings').upsert(rows, { onConflict: 'fund_code,ticker' });
+    if (error) throw new Error(`[${fundCode}] upsert hatası: ${error.message}`);
+    upserted += rows.length;
+
+    // Stale auto temizliği: bu fon için raporda olmayan AUTO satırları sil (kap-pdf korunur)
+    const tickers = rows.map((r) => r.ticker);
+    const { data: existing } = await supabase.from('fund_holdings').select('ticker, source').eq('fund_code', fundCode);
+    const keepSet = new Set(tickers);
+    const stale = (existing ?? []).filter((e) => !['manual', 'kap-pdf', 'calibration'].includes(e.source) && !keepSet.has(e.ticker));
+    if (stale.length > 0) {
+      const { error: delErr } = await supabase
+        .from('fund_holdings')
+        .delete()
+        .eq('fund_code', fundCode)
+        .in('ticker', stale.map((s) => s.ticker));
+      if (delErr) console.error(`[${fundCode}] stale silme hatası: ${delErr.message}`);
+      else console.log(`[${fundCode}] ${stale.length} eski AUTO satır silindi`);
+    }
+  }
+
+  console.log(`\nÖZET: ${upserted} satır KAP PDF olarak yazıldı (source=kap-pdf, ham veri, ana kaynak)`);
+  for (const m of meta) {
+    console.log(`  ${m.fundCode} ${m.asOfDate} ${m.count} hisse ← ${m.file}`);
+  }
+}
+
+main().catch((e) => {
+  console.error(`FATAL: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+  process.exit(1);
+});
+
+
+====================================================================
+FILE: .github/workflows/fund-holdings-sync.yml
+====================================================================
+name: fund-holdings-sync
+
+on:
+  schedule:
+    # Günlük 06:00 UTC (09:00 TRT) ve 15:00 UTC (18:00 TRT) — borsa kapanış sonrası
+    # Fon yöneticisi günlük trade yapabildiği için sürekli güncelleme şart
+    - cron: '0 6 * * *'
+    - cron: '0 15 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fund-holdings-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Kur (npm)
+        run: npm ci
+
+      - name: Fon içeriğini çek + parse + Supabase (yalnızca fund_holdings)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx -y tsx@4 scripts/fund_holdings/sync.ts
+
+      - name: "Teşhis: DFI ham HTML arşiv (yalnızca tanı amaçlı, hiçbir tabloya yazmaz)"
+        if: always()
+        run: |
+          curl -sL --max-time 30 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' -H 'accept: text/html' 'https://fintables.com/fonlar/DFI' -o dfi-live.html || echo "curl hatası"
+          echo "DFI boyut: $(wc -c < dfi-live.html 2>/dev/null || echo 0) bayt"
+          echo "sirketler/ sayaci: $(grep -c 'sirketler/' dfi-live.html 2>/dev/null || true)"
+          echo "IEYHO sayaci: $(grep -c 'IEYHO' dfi-live.html 2>/dev/null || true)"
+
+      - name: "Arsiv: dfi-live-html"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dfi-live-html
+          path: dfi-live.html
+          if-no-files-found: ignore
+
+
+====================================================================
+FILE: .github/workflows/kap-pdf-sync.yml
+====================================================================
+name: kap-pdf-sync
+
+# KAP Portföy Dağılım Raporu otomatik çekme + parse + Supabase
+# Fon yöneticisi günlük trade yapabildiği için:
+#   - KAP PDF en doğru resmi kaynak (haftalık TLY, aylık THF)
+#   - Ama günlük değişimler için fund-holdings-sync (fintables/rotaborsa) de çalışır
+#   - KAP PDF taze ise (TLY 7 gün, THF 30 gün) auto overwrite edemez, bayatlayınca edebilir
+
+on:
+  schedule:
+    # Her gün 05:00 UTC (08:00 TRT) — KAP gece yayınlar, sabah çek
+    - cron: '0 5 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kap-pdf-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Kur (python kap-client + npm)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install kap-client httpx
+          npm ci
+
+      - name: 1/2 KAP PDF'leri çek (kap-client → data/kap_pdfs/)
+        run: |
+          python scripts/fund_holdings/kap_pdf_fetch.py
+        continue-on-error: false
+
+      - name: 2/2 Parse + Supabase upsert (source=kap-pdf, ana kaynak)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          npx -y tsx@4 scripts/fund_holdings/kap_pdf_upsert.ts
+
+      - name: Arşiv — indirilen PDF'ler (teşhis)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kap-pdfs
+          path: data/kap_pdfs/
+          if-no-files-found: ignore
+
+
+====================================================================
+FILE: .github/workflows/twitter-sync.yml
+====================================================================
+name: twitter-sync
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: twitter-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Kur (twitter-cli 0.8.5 + pyyaml + pillow + pytesseract + supabase + npm)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-tur
+          python -m pip install --upgrade pip
+          python -m pip install "twitter-cli==0.8.5" pyyaml pillow pytesseract supabase
+          npm ci
+      - name: 1/3 Tweetleri çek (twitter-cli → data/tweets.json + media_urls)
+        env:
+          TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
+          TWITTER_CT0: ${{ secrets.TWITTER_CT0 }}
+          TWITTER_SYNC_HANDLE: sevketozhan
+          TWITTER_SYNC_COUNT: '50'
+        run: python scripts/twitter_sync/fetch_tweets.py
+      - name: 2/3 Foto OCR → fund_holding_proposals (onay kutusu için)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/twitter_sync/ocr_holdings.py
+        continue-on-error: true
+      - name: 3/3 Parse + Supabase (yalnızca social_predictions)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          AUTO_VERIFY: '1'
+        run: npx -y tsx@4 scripts/twitter_sync/sync.ts
+      - name: Temizlik
+        if: always()
+        run: rm -rf data/tweets.json data/images
+
+
+====================================================================
+FILE: docs/CONTINUOUS_UPDATE.md
+====================================================================
+# Sürekli Güncelleme — Fon İçeriği Mimari
+
+## Sorun
+KAP PDF en değerli doğru veri (resmi, denetlenmiş) ama:
+- TLY haftalık, THF aylık yayınlanır
+- Fon yöneticisi günlük alım/satım yapar → KAP PDF 1 gün sonra bayatlar
+- Eski sistem 45 gün boyunca auto kaynakları tamamen blokluyordu → günlük trade'ler kaçıyordu
+
+## Çözüm: 3 Katmanlı Sürekli Güncelleme
+
+### 1. KAP PDF — Ana Kaynak (kap-pdf-sync)
+- **Ne**: KAP Portföy Dağılım Raporu PDF'leri (resmi)
+- **Sıklık**: Günlük 05:00 UTC (08:00 TRT) — `kap-pdf-sync.yml`
+- **Araç**: `kap_pdf_fetch.py` (kap-client ile KAP API'den çek) + `kap_pdf_upsert.ts` (parse + Supabase)
+- **Source**: `kap-pdf` — ham veri, onay yok, manuel gibi korunur
+- **Tazelik**: TLY 7 gün (haftalık), THF 30 gün (aylık), diğer 45 gün
+- **Fallback**: Otomatik çekme başarısız olursa kullanıcı manuel PDF yükler (`/api/fund-holdings/parse-pdf`)
+
+### 2. Auto Kaynaklar — Günlük Trade Takibi (fund-holdings-sync)
+- **Ne**: fintables.com + rotaborsa.com hisse dağılımları
+- **Sıklık**: Günlük 06:00 UTC (09:00 TRT) + 15:00 UTC (18:00 TRT) — borsa kapanış sonrası
+- **Mantık**:
+  - KAP PDF taze ise (age ≤ eşik): kap-pdf ticker'ları korunur, auto sadece yeni ticker ekler
+  - KAP PDF bayat ise (age > eşik): kap-pdf ticker'ları auto overwrite edebilir, satılanlar silinebilir
+  - Manuel + calibration ASLA ezilmez/silinmez
+- **Source**: `auto` / `fintables` / `rotaborsa`
+
+### 3. Twitter Foto OCR — Anlık Öneri (twitter-sync)
+- **Ne**: @sevketozhan günlük etki fotoğraflarından OCR ile ağırlık tahmini
+- **Sıklık**: Her 30 dakikada
+- **Akış**: Foto → OCR → `fund_holding_proposals` (pending) → UI onay kutusu → manuel onayla `fund_holdings` (source=manual)
+- **Otomatik yazım YOK** — sadece öneri
+
+## Koruma Matrisi
+
+| Source | Taze KAP varken | Bayat KAP | Manuel |
+|--------|----------------|-----------|--------|
+| manual | korunur | korunur | — |
+| calibration | korunur | korunur | — |
+| kap-pdf | korunur (taze) | overwrite izni (bayat) | — |
+| auto | sadece yeni ticker | overwrite + silme | — |
+
+## UI Göstergeleri (FundContentTab)
+- `KAP PDF TAZE 2g` — yeşil, resmi veri güncel
+- `KAP PDF BAYAT 12g >7g → auto devrede` — amber, günlük trade takibi aktif
+- `AUTO GÜNLÜK` — sky, sadece auto kaynak var
+- Kaynak rozetleri: kap-pdf (emerald), manual (amber), calibration (violet), auto (sky)
+
+## Workflow'lar
+
+### fund-holdings-sync.yml
+```yaml
+cron: 0 6 * * *  # 09:00 TRT
+cron: 0 15 * * * # 18:00 TRT
+```
+- fintables + rotaborsa → parse → Supabase fund_holdings (auto)
+- Tazelik eşikli koruma
+
+### kap-pdf-sync.yml (YENİ)
+```yaml
+cron: 0 5 * * *  # 08:00 TRT
+```
+- kap-client ile KAP'tan son 30 gün Portföy Dağılım Raporlarını çek
+- Java serialization wrapper çöz
+- data/kap_pdfs/ → pdf-parse → kapPdfParser → Supabase (kap-pdf)
+
+### twitter-sync.yml
+```yaml
+cron: */30 * * * *
+```
+- Tweet çek + foto OCR → proposals
+
+## Veri Akışı Örneği (TLY)
+
+1. **31 Ağustos**: KAP PDF yayınlanır (TLY Ağustos 2026)
+   - kap-pdf-sync indirir → 44 hisse %84.05 FTD → fund_holdings source=kap-pdf
+   - UI: `KAP PDF TAZE 0g`
+
+2. **1 Eylül**: Yönetici OZATD satar, yeni hisse alır
+   - fund-holdings-sync (09:00) fintables'tan yeni dağılımı çeker
+   - OZATD kap-pdf korumalı olduğu için (taze) overwrite edilmez → eski ağırlık kalır
+   - Ama yeni hisse auto olarak eklenir
+   - UI: `KAP PDF TAZE 1g` + auto ticker'lar
+
+3. **8 Eylül**: KAP PDF 8 gün oldu → bayat
+   - fund-holdings-sync: kap-pdf artık korunmaz, auto OZATD'yi güncel ağırlıkla overwrite eder, satılanlar silinir
+   - UI: `KAP PDF BAYAT 8g >7g → auto devrede`
+
+4. **9 Eylül**: Yeni KAP PDF (Eylül haftalık) yayınlanır
+   - kap-pdf-sync indirir → yeni resmi veri → fund_holdings overwrite (kap-pdf taze olur)
+   - UI: `KAP PDF TAZE 0g`
+
+## Manuel Müdahale
+
+- KAP auto-fetch başarısız olursa: UI'dan PDF yükle → `/api/fund-holdings/parse-pdf` → önizleme → Kaydet (source=kap-pdf)
+- Acil düzeltme: Manuel satır ekle (source=manual) — asla ezilmez
+
+## Gelecek İyileştirmeler
+
+- KAP API rate limit ve WAF için retry + backoff
+- PDF parse için OCR fallback (taranmış PDF)
+- Fiyat değişimlerinden ağırlık tahmini (nominal sabit varsayımı)
+- Telegram/Discord bildirimi: KAP PDF bayatlayınca uyar
+
+
+====================================================================
+FILE: app/api/fund-holdings/parse-pdf/route.ts
+====================================================================
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { getUserFromRequest } from '@/lib/supabaseServer';
+import { parseKapPdfHoldings, validateKapParsed } from '@/lib/kapPdfParser';
+import { toHoldingRows } from '@/lib/fundHoldings';
+
+export const dynamic = 'force-dynamic';
+
+/**
+ * KAP PDF → fon içeriği parse
+ *
+ * POST /api/fund-holdings/parse-pdf
+ * Body: multipart/form-data
+ *   - file: PDF dosyası
+ *   - fund_code: TLY (opsiyonel, default TLY)
+ *
+ * Auth: Bearer token zorunlu (portföy kişisel)
+ *
+ * Dönüş:
+ *   { ok:true, code, asOfDate, reportLabel, holdings: [...], excludedCount, totalWeight }
+ *   holdings: toHoldingRows formatında (fund_code,ticker,company_name,weight_pct,as_of_date,source,notes)
+ *
+ * Hiçbir tabloya YAZMAZ — sadece parse eder, önizleme döndürür.
+ * Yazma işlemi client'ta FundContentTab üzerinden onUpsert ile yapılır (source=manual/kap-pdf).
+ */
+
+export async function POST(req: NextRequest) {
+  const user = await getUserFromRequest(req);
+  if (!user) {
+    return NextResponse.json({ error: 'Oturum gerekli' }, { status: 401 });
+  }
+
+  try {
+    const form = await req.formData();
+    const file = form.get('file') as File | null;
+    const rawCode = (form.get('fund_code') as string | null)?.trim().toUpperCase() || 'TLY';
+
+    if (!/^[A-Z0-9]{2,10}$/.test(rawCode)) {
+      return NextResponse.json({ error: 'Geçersiz fon kodu' }, { status: 400 });
+    }
+
+    if (!file) {
+      return NextResponse.json({ error: 'PDF dosyası gerekli (file alanı)' }, { status: 400 });
+    }
+
+    if (file.type && file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      return NextResponse.json({ error: 'Sadece PDF kabul edilir' }, { status: 400 });
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      return NextResponse.json({ error: 'PDF çok büyük (max 10MB)' }, { status: 400 });
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+
+    // pdf-parse dynamic import (ESM uyumu için)
+    // @ts-ignore - no types
+    const pdfParse = (await import('pdf-parse')).default as any;
+    const data = await pdfParse(buffer);
+    const text: string = data.text || '';
+
+    if (!text || text.trim().length < 100) {
+      return NextResponse.json({ ok: false, error: 'PDF metni okunamadı (taranmış görüntü olabilir, OCR gerekli)' }, { status: 422 });
+    }
+
+    const parsed = parseKapPdfHoldings(text, rawCode);
+    const v = validateKapParsed(parsed);
+
+    if (!v.ok) {
+      return NextResponse.json({
+        ok: false,
+        code: rawCode,
+        error: v.reason,
+        holdingsCount: parsed.holdings.length,
+        excludedCount: parsed.excludedCount,
+        asOfDate: parsed.asOfDate,
+        reportLabel: parsed.reportLabel,
+        previewText: text.slice(0, 2000), // debug için ilk 2k karakter
+      }, { status: 422 });
+    }
+
+    const rows = toHoldingRows(parsed as any).map((r) => ({
+      ...r,
+      source: 'kap-pdf' as const,
+      notes: `${parsed.reportLabel} | KAP PDF ${file.name} (otomatik parse)`,
+    }));
+
+    const totalWeight = rows.reduce((s, r) => s + r.weight_pct, 0);
+
+    return NextResponse.json({
+      ok: true,
+      code: rawCode,
+      source: 'kap-pdf',
+      asOfDate: parsed.asOfDate,
+      reportLabel: parsed.reportLabel,
+      holdings: rows,
+      excludedCount: parsed.excludedCount,
+      totalWeight: Number(totalWeight.toFixed(4)),
+      rowCount: rows.length,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: `PDF parse hatası: ${msg}` }, { status: 500 });
+  }
+}
+
+
+====================================================================
+FILE: components/FundContentTab.tsx
+====================================================================
+'use client';
+
+import React, { useMemo, useState } from 'react';
+import { Layers, Pencil, PlusCircle, Save, Trash2, MessageCircle, TrendingUp, CheckCircle, XCircle, Camera, FileText, Upload, Loader2 } from 'lucide-react';
+import { supabase } from '@/lib/supabase';
+import type { FundHoldingRow, SocialPrediction } from '@/lib/types';
+import type { HoldingPrice, FundPrediction } from '@/lib/fundHoldings';
+import { computeFundPrediction, summarizeHoldingRows } from '@/lib/fundHoldings';
+import { formatPublic } from '@/lib/mask';
+import { shouldAutoResearchFund } from '@/lib/fundCodes';
+import type { FundHoldingProposal } from '@/lib/repo';
+
+export interface FundHoldingDraft {
+  fund_code: string;
+  ticker: string;
+  company_name?: string | null;
+  weight_pct: number;
+  as_of_date: string;
+  notes?: string | null;
+}
+
+interface Props {
+  rows: FundHoldingRow[];
+  prices: Record<string, HoldingPrice | null>;
+  predictions?: SocialPrediction[];
+  proposals?: FundHoldingProposal[];
+  portfolioFundCodes?: string[];
+  masked: boolean;
+  /** Veritabanı hazır değilse form devre dışı (yazma denemesi yapılmaz). */
+  canWrite: boolean;
+  onUpsert: (draft: FundHoldingDraft) => Promise<void>;
+  onUpsertKapPdf?: (draft: FundHoldingDraft) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onApproveProposal?: (p: FundHoldingProposal) => Promise<void>;
+  onRejectProposal?: (id: string) => Promise<void>;
+}
+
+// Portföy kodu İÇERMEZ: bu bileşen herkese açık bundle'da yer alır.
+const EMPTY_FORM = {
+  fund_code: '',
+  ticker: '',
+  company_name: '',
+  weight_pct: '',
+  as_of_date: new Date().toISOString().slice(0, 10),
+  notes: '',
+};
+
+/**
+ * P3 — FON İÇERİĞİ SEKMESİ + v3.4 OCR onay kutusu
+ *
+ * Fon başına tablo: hisse / resmî ad / ağırlık % / hissenin günlük değişim % /
+ * fona etki (pp). Üstte as_of_date + source + dışlanan düşük etkili satır sayısı.
+ * Manuel override formu source='manual' yazar; otomatik sync job'u bu satırları
+ * ASLA ezmez (koruma scripts/fund_holdings/sync.ts içinde).
+ *
+ * v3.4: @sevketozhan günlük etki fotoğrafındaki tahmini ağırlıklar OCR ile
+ * fund_holding_proposals tablosuna pending olarak yazılır. Burada onay kutucuğu
+ * gösterilir: "twitterdan @sevketozhan hesabının günlük etki paylaşımından
+ * #TICKER ağırlığı %X olarak değişti bilgisi çekildi onaylarsanız hisse
+ * içeriği değiştirilecek" [ONAYLA][REDDET]. Onay → fund_holdings upsert
+ * source=manual + notes=twitter-photo, proposal approved. Red → rejected.
+ * Otomatik fund_holdings yazımı YOK — sadece manuel onay ile.
+ */
+export default function FundContentTab({ rows, prices, predictions = [], proposals = [], portfolioFundCodes = [], masked, canWrite, onUpsert, onUpsertKapPdf, onDelete, onApproveProposal, onRejectProposal }: Props) {
+  const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [formError, setFormError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // KAP PDF yükleme (TLY aylık raporu)
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfFundCode, setPdfFundCode] = useState('TLY');
+  const [pdfParsing, setPdfParsing] = useState(false);
+  const [pdfResult, setPdfResult] = useState<any>(null);
+  const [pdfError, setPdfError] = useState('');
+  const [pdfSaving, setPdfSaving] = useState(false);
+
+  const summaries = useMemo(() => summarizeHoldingRows(rows), [rows]);
+
+  const byFund = useMemo(() => {
+    const map = new Map<string, FundHoldingRow[]>();
+    for (const r of rows) {
+      const list = map.get(r.fund_code) ?? [];
+      list.push(r);
+      map.set(r.fund_code, list);
+    }
+    map.forEach((list) => list.sort((a, b) => b.weight_pct - a.weight_pct));
+    return map;
+  }, [rows]);
+
+  const proposalsByFund = useMemo(() => {
+    const map = new Map<string, FundHoldingProposal[]>();
+    for (const p of proposals) {
+      const code = p.fund_code.toUpperCase();
+      const list = map.get(code) ?? [];
+      list.push(p);
+      map.set(code, list);
+    }
+    map.forEach((list) => list.sort((a, b) => b.weight_pct - a.weight_pct));
+    return map;
+  }, [proposals]);
+
+  const predictionsMap = useMemo(() => {
+    const out: Record<string, FundPrediction> = {};
+    byFund.forEach((list, code) => {
+      out[code] = computeFundPrediction(
+        code,
+        list.map((r) => ({ ticker: r.ticker, name: r.company_name, weightPct: r.weight_pct, prevWeightPct: null })),
+        prices
+      );
+    });
+    return out;
+  }, [byFund, prices]);
+
+  // Sosyal tahminler — fon bazında grupla
+  const socialByFund = useMemo(() => {
+    const map = new Map<string, SocialPrediction[]>();
+    for (const p of predictions) {
+      const code = p.fund_code.toUpperCase();
+      const list = map.get(code) ?? [];
+      list.push(p);
+      map.set(code, list);
+    }
+    map.forEach((list) => list.sort((a, b) => b.prediction_date.localeCompare(a.prediction_date)));
+    return map;
+  }, [predictions]);
+
+  // Keep old name for compatibility inside render
+  const predictionsLocal = predictionsMap;
+
+  const submit = async () => {
+    const ticker = form.ticker.trim().toUpperCase();
+    const weight = parseFloat(form.weight_pct.replace(',', '.'));
+    const code = form.fund_code.trim().toUpperCase();
+    if (!code || !ticker) { setFormError('Fon kodu ve hisse kodu zorunlu.'); return; }
+    if (!/^[A-Z0-9]{2,10}$/.test(ticker)) { setFormError('Hisse kodu 2-10 karakter (A-Z, 0-9) olmalı.'); return; }
+    if (!Number.isFinite(weight) || weight <= 0 || weight > 100) { setFormError('Ağırlık 0-100 arasında bir sayı olmalı.'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(form.as_of_date)) { setFormError('Rapor dönemi GG.AA.YYYY biçiminde olmalı (YYYY-AA-GG).'); return; }
+
+    setBusy(true);
+    setFormError('');
+    await onUpsert({
+      fund_code: code,
+      ticker,
+      company_name: form.company_name.trim() || null,
+      weight_pct: Number(weight.toFixed(4)),
+      as_of_date: form.as_of_date,
+      notes: form.notes.trim() || 'manuel override (UI)',
+    });
+    setBusy(false);
+    setEditingId(null);
+    setForm({ ...EMPTY_FORM });
+  };
+
+  const startEdit = (r: FundHoldingRow) => {
+    setEditingId(r.id);
+    setForm({
+      fund_code: r.fund_code,
+      ticker: r.ticker,
+      company_name: r.company_name ?? '',
+      weight_pct: String(r.weight_pct),
+      as_of_date: r.as_of_date,
+      notes: r.notes ?? '',
+    });
+  };
+
+
+  const handlePdfParse = async () => {
+    if (!pdfFile) { setPdfError('PDF dosyası seçin'); return; }
+    setPdfParsing(true);
+    setPdfError('');
+    setPdfResult(null);
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) { setPdfError('Oturum token yok — tekrar giriş yapın'); return; }
+      const fd = new FormData();
+      fd.append('file', pdfFile);
+      fd.append('fund_code', pdfFundCode.trim().toUpperCase() || 'TLY');
+      const res = await fetch('/api/fund-holdings/parse-pdf', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) {
+        setPdfError(json.error || json.reason || 'PDF parse edilemedi');
+        if (json.previewText) console.log('PDF preview', json.previewText);
+        return;
+      }
+      setPdfResult(json);
+    } catch (e) {
+      setPdfError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPdfParsing(false);
+    }
+  };
+
+  const handlePdfSaveAll = async () => {
+    if (!pdfResult?.holdings?.length) return;
+    setPdfSaving(true);
+    try {
+      const saver = onUpsertKapPdf ?? onUpsert;
+      for (const h of pdfResult.holdings) {
+        await saver({
+          fund_code: h.fund_code,
+          ticker: h.ticker,
+          company_name: h.company_name ?? null,
+          weight_pct: h.weight_pct,
+          as_of_date: h.as_of_date,
+          notes: h.notes ?? `${pdfResult.reportLabel} | KAP PDF (ana kaynak, ham veri)`,
+        });
+      }
+      setPdfResult(null);
+      setPdfFile(null);
+    } finally {
+      setPdfSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 font-mono text-xs">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+            <Layers className="w-4 h-4 text-sky-400" /> FON İÇERİĞİ (HİSSE DAĞILIMI) — SÜREKLİ GÜNCELLEME
+          </h2>
+          <p className="text-[10px] text-slate-500 mt-1">
+            <span className="text-sky-300 font-bold">KAP PDF en doğru resmi kaynak</span> (TLY haftalık, THF aylık) ama fon yöneticisi günlük trade yapar.
+            Sürekli güncelleme: <span className="text-slate-300">KAP PDF (kap-pdf-sync günlük 08:00 TRT) + fintables/rotaborsa (fund-holdings-sync 09:00 & 18:00 TRT) + Twitter foto OCR (30dk)</span>.
+            KAP PDF taze iken (TLY 7 gün, THF 30 gün) auto overwrite edemez; bayatlayınca günlük trade takibi için auto devralır. Manuel override asla ezilmez.
+          </p>
+        </div>
+        <span className="text-[10px] text-slate-400 bg-slate-900 border border-slate-800 px-2 py-1 rounded">
+          {rows.length} satır • {summaries.length} fon • {proposals.length} öneri
+        </span>
+      </div>
+
+      {/* v3.4 — Onay bekleyen Twitter foto OCR önerileri (global) */}
+      {proposals.length > 0 && (
+        <div className="bg-amber-950/20 border border-amber-800 rounded-lg p-4 space-y-3">
+          <h3 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+            <Camera className="w-4 h-4" /> TWITTER FOTO OCR — ONAY BEKLEYEN ÖNERİLER ({proposals.length})
+          </h3>
+          <p className="text-[10px] text-amber-200/70">
+            @sevketozhan günlük etki fotoğrafından tahmini ağırlıklar OCR ile çekildi. Onaylarsanız fund_holdings
+            tablosuna source=manual olarak yazılacak (otomatik yazım YOK, resmi KAP raporu öncelikli).
+          </p>
+          <div className="space-y-2 max-h-72 overflow-y-auto">
+            {proposals.map((pr) => (
+              <div key={pr.id} className="bg-slate-900 border border-amber-900/50 rounded p-3 flex items-center justify-between gap-3">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-sky-300">{pr.fund_code}</span>
+                    <span className="font-bold text-amber-300">#{pr.ticker}</span>
+                    <span className="text-slate-200">ağırlığı %{formatPublic(pr.weight_pct, { digits: 2 })} olarak değişti</span>
+                    {pr.prev_weight_pct != null && (
+                      <span className="text-slate-400">(önceki %{formatPublic(pr.prev_weight_pct, { digits: 2 })} → %{formatPublic(pr.weight_pct, { digits: 2 })})</span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-1">
+                    twitterdan {pr.predictor_handle ?? '@sevketozhan'} hesabının günlük etki paylaşımından #{pr.ticker} ağırlığı %{formatPublic(pr.weight_pct, { digits: 2 })} olarak değişti bilgisi çekildi
+                    {pr.source_tweet_id ? ` (kaynak: ${pr.source_tweet_id})` : ''} — onaylarsanız hisse içeriği değiştirilecek
+                  </div>
+                  {pr.raw_text && <div className="text-[9px] text-slate-500 mt-1 truncate">{pr.raw_text.slice(0, 200)}</div>}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => onApproveProposal?.(pr)}
+                    disabled={!canWrite}
+                    className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-3 py-1.5 rounded flex items-center gap-1"
+                  >
+                    <CheckCircle className="w-3.5 h-3.5" /> ONAYLA
+                  </button>
+                  <button
+                    onClick={() => onRejectProposal?.(pr.id)}
+                    disabled={!canWrite}
+                    className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 font-bold px-3 py-1.5 rounded flex items-center gap-1"
+                  >
+                    <XCircle className="w-3.5 h-3.5" /> REDDET
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {rows.length === 0 && (
+        <div className="bg-[#111726] border border-slate-800 rounded-lg p-6 text-slate-400">
+          Fon içeriği kaydı yok. Aşağıdaki formdan elle ekleyin ya da
+          <span className="text-slate-300"> fund-holdings-sync </span>
+          işini çalıştırın (GitHub Actions → fund-holdings-sync → Run workflow).
+          Tablo yoksa önce <span className="text-slate-300">supabase/supabase_fund_holdings_migration.sql</span> çalıştırılmalı.
+        </div>
+      )}
+
+      {/* Portföyde olup içeriği henüz çekilmemiş fonlar (THF dahil) — otomatik araştırma bekliyor */}
+      {portfolioFundCodes.length > 0 && (() => {
+        const existing = new Set(rows.map((r) => r.fund_code.toUpperCase()));
+        const missing = portfolioFundCodes.filter((c) => !existing.has(c.toUpperCase()) && shouldAutoResearchFund(c));
+        if (missing.length === 0) return null;
+        return (
+          <div className="bg-sky-950/20 border border-sky-800 rounded-lg p-4 space-y-2">
+            <h3 className="text-sm font-bold text-sky-300">PORTFÖYDEKİ FONLAR — İÇERİK OTOMATİK ARAŞTIRILIYOR ({missing.length})</h3>
+            <p className="text-[10px] text-slate-400">Bu fonlar portföyünüzde var ama fund_holdings tablosunda kaydı yok. Otomatik araştırma fintables üzerinden çekiyor (THF dahil). Birkaç saniye içinde tabloya eklenecek.</p>
+            <div className="flex flex-wrap gap-2">
+              {missing.map((code) => (
+                <span key={code} className="px-2 py-1 rounded bg-slate-900 border border-sky-800 text-sky-300 text-[11px] font-bold">{code} — araştırılıyor...</span>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
+      {summaries.map((s) => {
+        const list = byFund.get(s.fundCode) ?? [];
+        const pred = predictionsLocal[s.fundCode];
+        const socialList = socialByFund.get(s.fundCode) ?? [];
+        const validSocial = socialList.filter((p) => p.predicted_return_pct != null && p.status !== 'VERI_EKSİK');
+        const avgSocial = validSocial.length > 0 ? validSocial.reduce((sum, p) => sum + (p.predicted_return_pct as number), 0) / validSocial.length : null;
+        const blended = pred && pred.predictedPct != null && avgSocial != null ? pred.predictedPct * 0.6 + avgSocial * 0.4 : null;
+        const fundProposals = proposalsByFund.get(s.fundCode) ?? [];
+
+        // Tazelik hesapla: asOfDate → gün farkı, eşik TLY 7, THF 30
+        const freshThreshold = s.fundCode === 'TLY' ? 7 : s.fundCode === 'THF' ? 30 : 45;
+        let ageDays: number | null = null;
+        let freshness: 'taze' | 'bayat' | 'yok' = 'yok';
+        if (s.asOfDate) {
+          const asOf = new Date(s.asOfDate);
+          if (!isNaN(asOf.getTime())) {
+            ageDays = Math.floor((Date.now() - asOf.getTime()) / (1000 * 60 * 60 * 24));
+            freshness = ageDays <= freshThreshold ? 'taze' : 'bayat';
+          }
+        }
+        const hasKapPdf = s.sources.includes('kap-pdf');
+        const hasAuto = s.sources.some((src) => ['auto', 'fintables', 'rotaborsa'].includes(src));
+        return (
+          <div key={s.fundCode} className="bg-[#111726] border border-slate-800 rounded-lg overflow-hidden">
+            <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-sky-300 text-sm flex items-center gap-2">
+                  {s.fundCode}
+                  {hasKapPdf && freshness === 'taze' && <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">KAP PDF TAZE {ageDays}g</span>}
+                  {hasKapPdf && freshness === 'bayat' && <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-amber-950 text-amber-300 border border-amber-800">KAP PDF BAYAT {ageDays}g &gt;{freshThreshold}g → auto devrede</span>}
+                  {!hasKapPdf && hasAuto && <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-sky-950 text-sky-300 border border-sky-800">AUTO GÜNLÜK</span>}
+                </h3>
+                <div className="text-[10px] text-slate-500 mt-1 space-x-3">
+                  <span>📅 Rapor dönemi: <span className="text-slate-300">{s.asOfDate ?? '—'}</span>{ageDays != null && ` (${ageDays}g önce)`}</span>
+                  <span>📦 Kaynak: <span className="text-slate-300">{s.sources.join(' + ') || '—'}</span></span>
+                  <span>🔢 Satır: <span className="text-slate-300">{s.rowCount}</span></span>
+                  <span>
+                    ⚖️ Toplam ağırlık: <span className="text-slate-300">%{formatPublic(s.totalWeightPct, { digits: 2 })}</span>
+                  </span>
+                  <span>
+                    🚫 Dışlanan (&lt;%0,01):{' '}
+                    <span className="text-slate-300">
+                      {s.excludedCount != null ? s.excludedCount : 'VERİ EKSİK'}
+                    </span>
+                  </span>
+                  {s.manualCount > 0 && (
+                    <span className="text-amber-300">✍️ {s.manualCount} manuel satır (sync ezmez)</span>
+                  )}
+                  {fundProposals.length > 0 && (
+                    <span className="text-amber-300">📷 {fundProposals.length} OCR öneri bekliyor</span>
+                  )}
+                  <span className="text-slate-400">⏱️ Eşik: {freshThreshold}g</span>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] text-slate-500">GÜNLÜK TAHMİN (ağırlıklı)</div>
+                <div className={`text-lg font-bold ${pred && (pred.predictedPct ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {pred && pred.predictedPct != null
+                    ? `${pred.predictedPct >= 0 ? '+' : ''}${formatPublic(pred.predictedPct, { digits: 2 })}%`
+                    : '—'}
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  Kaplama: %{pred ? formatPublic(pred.coveredPct, { digits: 2 }) : '—'}
+                  {pred && pred.missingTickers.length > 0 && (
+                    <span className="text-amber-300"> • fiyatı eksik: {pred.missingTickers.join(', ')}</span>
+                  )}
+                </div>
+                {/* Sosyal tahmin beslemesi */}
+                {socialList.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-slate-800/50 space-y-1">
+                    <div className="flex items-center gap-1 text-[10px] text-sky-300 font-bold">
+                      <MessageCircle className="w-3 h-3" /> SOSYAL TAHMİN ({socialList.length}) {avgSocial != null && <span className="text-slate-300">• Ort: {avgSocial >= 0 ? '+' : ''}{formatPublic(avgSocial, { digits: 2 })}%</span>}
+                      {blended != null && <span className="text-amber-300 flex items-center gap-1"><TrendingUp className="w-3 h-3" /> Birleştirilmiş: {blended >= 0 ? '+' : ''}{formatPublic(blended, { digits: 2 })}% (Model %60 + Sosyal %40)</span>}
+                    </div>
+                    <div className="space-y-0.5 max-h-20 overflow-y-auto">
+                      {socialList.slice(0, 3).map((sp) => (
+                        <div key={sp.id} className="flex items-center gap-2 text-[10px] text-slate-400">
+                          <span className="text-sky-400">{sp.predictor_handle}</span>
+                          <span className={`${(sp.predicted_return_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{sp.predicted_return_pct != null ? `${sp.predicted_return_pct >= 0 ? '+' : ''}${formatPublic(sp.predicted_return_pct, { digits: 2 })}%` : 'VERİ EKSİK'}</span>
+                          <span>{sp.prediction_date}</span>
+                          <span className={`px-1 rounded border text-[9px] ${sp.status === 'DOGRULANDI' ? 'bg-emerald-950 border-emerald-800 text-emerald-300' : sp.status === 'VERI_EKSİK' ? 'bg-amber-950 border-amber-800 text-amber-300' : 'bg-slate-800 border-slate-700 text-slate-300'}`}>{sp.status}</span>
+                          {sp.accuracy_score != null && <span className="text-slate-500">isabet %{formatPublic(sp.accuracy_score, { digits: 0 })}</span>}
+                        </div>
+                      ))}
+                      {socialList.length > 3 && <div className="text-[9px] text-slate-500">+{socialList.length - 3} daha → Sosyal Doğrulama sekmesinde</div>}
+                    </div>
+                  </div>
+                )}
+                {/* DFI özel uyarı — fintables secondary eksik veri */}
+                {s.fundCode === 'DFI' && s.totalWeightPct < 50 && (
+                  <div className="mt-2 text-[9px] text-amber-300 bg-amber-950/30 border border-amber-800 rounded px-2 py-1">
+                    ⚠️ DFI içeriği fintables secondary kaynaktan (free tier sadece 3 hisse gösteriyor, resmi hisse oranı %53.32). Resmi KAP PDF ile doğrulama için Faz 4 bekleniyor.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Fon bazında OCR önerileri (inline) */}
+            {fundProposals.length > 0 && (
+              <div className="bg-amber-950/10 border-b border-amber-900/30 p-3 space-y-2">
+                <div className="text-[11px] font-bold text-amber-300 flex items-center gap-1"><Camera className="w-3 h-3" /> {s.fundCode} için {fundProposals.length} OCR önerisi — onay bekliyor</div>
+                {fundProposals.map((pr) => (
+                  <div key={pr.id} className="flex items-center justify-between gap-2 bg-slate-900/60 border border-amber-900/20 rounded px-3 py-2">
+                    <span className="text-[11px] text-slate-200">
+                      twitterdan {pr.predictor_handle ?? '@sevketozhan'} hesabının günlük etki paylaşımından #{pr.ticker} ağırlığı %{formatPublic(pr.weight_pct, { digits: 2 })} olarak değişti bilgisi çekildi onaylarsanız hisse içeriği değiştirilecek
+                      {pr.prev_weight_pct != null ? ` (önceki %${formatPublic(pr.prev_weight_pct, { digits: 2 })} → %${formatPublic(pr.weight_pct, { digits: 2 })})` : ''}
+                    </span>
+                    <span className="flex gap-1 shrink-0">
+                      <button onClick={() => onApproveProposal?.(pr)} disabled={!canWrite} className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-2 py-1 rounded text-[10px] flex items-center gap-1"><CheckCircle className="w-3 h-3" /> ONAYLA</button>
+                      <button onClick={() => onRejectProposal?.(pr.id)} disabled={!canWrite} className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 font-bold px-2 py-1 rounded text-[10px] flex items-center gap-1"><XCircle className="w-3 h-3" /> REDDET</button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-[#0d121f] text-slate-400 border-b border-slate-800">
+                  <tr>
+                    <th className="p-3">HİSSE</th>
+                    <th className="p-3">RESMÎ AD</th>
+                    <th className="p-3 text-right">AĞIRLIK %</th>
+                    <th className="p-3 text-right">GÜNLÜK %</th>
+                    <th className="p-3 text-right">FONA ETKİ (pp)</th>
+                    <th className="p-3 text-center">KAYNAK</th>
+                    <th className="p-3 text-center">İŞLEM</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {list.map((r) => {
+                    const price = prices[r.ticker] ?? null;
+                    const impact = price && Number.isFinite(price.changePct)
+                      ? (r.weight_pct * price.changePct) / 100
+                      : null;
+                    return (
+                      <tr key={r.id} className="hover:bg-slate-800/30">
+                        <td className="p-3 font-bold text-sky-400">{r.ticker}</td>
+                        <td className="p-3 text-slate-300">{r.company_name ?? '—'}</td>
+                        <td className="p-3 text-right text-slate-100 font-bold">
+                          %{formatPublic(r.weight_pct, { digits: 2 })}
+                        </td>
+                        <td className={`p-3 text-right ${price == null ? 'text-amber-300' : price.changePct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {price == null ? 'VERİ EKSİK' : `${price.changePct >= 0 ? '+' : ''}${formatPublic(price.changePct, { digits: 2 })}%`}
+                        </td>
+                        <td className={`p-3 text-right font-bold ${impact == null ? 'text-slate-500' : impact >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {impact == null ? '—' : `${impact >= 0 ? '+' : ''}${formatPublic(impact, { digits: 3 })}`}
+                        </td>
+                        <td className="p-3 text-center">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            r.source === 'kap-pdf'
+                              ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                              : r.source === 'manual'
+                              ? 'bg-amber-950 text-amber-300 border-amber-800'
+                              : r.source === 'calibration'
+                              ? 'bg-violet-950 text-violet-300 border-violet-800'
+                              : 'bg-sky-950 text-sky-300 border-sky-800'
+                          }`}>{r.source}</span>
+                        </td>
+                        <td className="p-3 text-center">
+                          <span className="inline-flex gap-1.5">
+                            <button
+                              onClick={() => startEdit(r)}
+                              disabled={!canWrite}
+                              title="Düzenle (source=manual olur)"
+                              className="text-slate-400 hover:text-sky-300 disabled:opacity-40"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => onDelete(r.id)}
+                              disabled={!canWrite}
+                              title="Sil"
+                              className="text-slate-400 hover:text-rose-300 disabled:opacity-40"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* KAP PDF Yükleme — TLY aylık dağılım raporu */}
+      <div className="bg-[#111726] border border-sky-800 rounded-lg p-5 space-y-3">
+        <h3 className="text-sm font-bold text-sky-300 flex items-center gap-2">
+          <FileText className="w-4 h-4" /> KAP PDF YÜKLE — AYLIK PORTFÖY DAĞILIM RAPORU (TLY)
+        </h3>
+        <p className="text-[10px] text-slate-400">
+          KAP'tan indirdiğin TLY_2026.xx.pdf gibi aylık raporu yükle. Sistem hisse kodlarını ve GRUP (%) ağırlıklarını otomatik çıkarır,
+          aynı ticker birden fazla lot ise toplar, %0,01 altı atar. Önizleme sonrası onayla → fund_holdings tablosuna source='kap-pdf' + manual override olarak yazar (sync ezmez).
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+          <input value={pdfFundCode} onChange={(e) => setPdfFundCode(e.target.value.toUpperCase())} placeholder="FON KODU (TLY)" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 uppercase focus:outline-none focus:border-sky-500" />
+          <input type="file" accept=".pdf,application/pdf" onChange={(e) => setPdfFile(e.target.files?.[0] ?? null)} className="bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-300 file:mr-2 file:bg-sky-800 file:text-white file:border-0 file:rounded file:px-2 file:py-1 file:text-[11px]" />
+          <button onClick={handlePdfParse} disabled={pdfParsing || !pdfFile || !canWrite} className="bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-white font-bold px-4 py-2 rounded flex items-center gap-2 justify-center">
+            {pdfParsing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />} {pdfParsing ? 'PARSE EDİLİYOR...' : 'PDF\'İ PARSE ET'}
+          </button>
+          <div className="text-[10px] text-slate-500 flex items-center">{pdfFile ? `${pdfFile.name} (${(pdfFile.size/1024).toFixed(0)} KB)` : 'PDF seçilmedi'}</div>
+        </div>
+        {pdfError && <div className="text-rose-400 text-[11px] bg-rose-950/30 border border-rose-800 rounded p-2">⚠️ {pdfError}</div>}
+        {pdfResult && (
+          <div className="space-y-3 bg-slate-900 border border-slate-800 rounded p-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-[11px]">
+                <span className="text-sky-300 font-bold">{pdfResult.code}</span>
+                <span className="text-slate-400 ml-2">📅 {pdfResult.asOfDate ?? '—'} — {pdfResult.reportLabel}</span>
+                <span className="text-slate-300 ml-2">🔢 {pdfResult.rowCount} hisse</span>
+                <span className="text-slate-300 ml-2">⚖️ Toplam %{formatPublic(pdfResult.totalWeight, { digits: 2 })}</span>
+                {pdfResult.excludedCount > 0 && <span className="text-slate-500 ml-2">🚫 {pdfResult.excludedCount} dışlandı (&lt;%0,01)</span>}
+              </div>
+              <button onClick={handlePdfSaveAll} disabled={pdfSaving || !canWrite} className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-4 py-2 rounded flex items-center gap-2">
+                {pdfSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} {pdfSaving ? 'KAYDEDİLİYOR...' : `TÜMÜNÜ KAYDET (${pdfResult.rowCount})`}
+              </button>
+            </div>
+            <div className="overflow-x-auto max-h-72 overflow-y-auto border border-slate-800 rounded">
+              <table className="w-full text-left text-[11px]">
+                <thead className="bg-[#0d121f] text-slate-400 sticky top-0">
+                  <tr><th className="p-2">HİSSE</th><th className="p-2">AD</th><th className="p-2 text-right">AĞIRLIK %</th><th className="p-2">TARİH</th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {pdfResult.holdings.map((h: any) => (
+                    <tr key={h.ticker} className="hover:bg-slate-800/30">
+                      <td className="p-2 font-bold text-sky-400">{h.ticker}</td>
+                      <td className="p-2 text-slate-300">{h.company_name ?? '—'}</td>
+                      <td className="p-2 text-right text-slate-100">%{formatPublic(h.weight_pct, { digits: 2 })}</td>
+                      <td className="p-2 text-slate-400">{h.as_of_date}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] text-slate-500">Kaydedince her satır source='manual' (kap-pdf notu ile) olur, otomatik sync ezmez. Önceki TLY kayıtları aynı ticker için güncellenir, raporda olmayan auto satırlar daha sonra fund-holdings-sync tarafından temizlenebilir (manuel korunur).</p>
+          </div>
+        )}
+      </div>
+
+      {/* Manuel override formu */}
+      <div className="bg-[#111726] border border-slate-800 rounded-lg p-5 space-y-3">
+        <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+          {editingId ? <Pencil className="w-4 h-4 text-amber-400" /> : <PlusCircle className="w-4 h-4 text-sky-400" />}
+          {editingId ? 'SATIRI DÜZENLE' : 'MANUEL SATIR EKLE (override)'}
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+          <input value={form.fund_code} onChange={(e) => setForm({ ...form, fund_code: e.target.value })} placeholder="FON KODU" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 uppercase focus:outline-none focus:border-sky-500" />
+          <input value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} placeholder="HİSSE KODU" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 uppercase focus:outline-none focus:border-sky-500" />
+          <input value={form.company_name} onChange={(e) => setForm({ ...form, company_name: e.target.value })} placeholder="RESMÎ AD" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500" />
+          <input value={form.weight_pct} onChange={(e) => setForm({ ...form, weight_pct: e.target.value })} placeholder="AĞIRLIK %" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500" />
+          <input value={form.as_of_date} onChange={(e) => setForm({ ...form, as_of_date: e.target.value })} placeholder="YYYY-AA-GG" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500" />
+          <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="NOT" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500" />
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            onClick={submit}
+            disabled={busy || !canWrite}
+            className="bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold px-4 py-2 rounded flex items-center gap-2"
+          >
+            <Save className="w-3.5 h-3.5" /> {editingId ? 'GÜNCELLE' : 'KAYDET'}
+          </button>
+          {editingId && (
+            <button
+              onClick={() => { setEditingId(null); setForm({ ...EMPTY_FORM }); setFormError(''); }}
+              className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded border border-slate-700"
+            >
+              VAZGEÇ
+            </button>
+          )}
+          {formError && <span className="text-rose-400 text-[11px]">⚠️ {formError}</span>}
+          {!canWrite && <span className="text-amber-300 text-[11px]">Yazma için veritabanı bağlantısı ve oturum gerekli.</span>}
+        </div>
+        <p className="text-[10px] text-slate-500">
+          Kaydedilen satır <span className="text-amber-300">source=&apos;manual&apos;</span> olur; otomatik
+          fund-holdings-sync işi manuel satırları asla ezmez ve silmez. Ağırlık toplamı 100&apos;ü aşmamalı.
+          Twitter foto OCR önerileri yalnızca onay ile yazılır — otomatik yazım yok.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+
+====================================================================
+FILE: supabase/supabase_schema.sql
+====================================================================
+-- ==============================================================================
+-- YATIRIM TERMİNALİ v3.1 — SUPABASE VERİTABANI ŞEMASI (v2 — AUTH GÜVENCELİ RLS)
+--
+-- Kurulum:
+--   1. supabase.com → yeni proje → SQL Editor → bu dosyanın tamamını çalıştır.
+--   2. Authentication → Providers → Email AÇIK.
+--      (Kişisel terminal için "Confirm email" KAPALI önerilir; açık bırakırsanız
+--       terminaldeki "Hesap Oluştur" sonrası e-postanızdaki onay linkine tıklayın.)
+--   3. Project Settings → API → URL ve anon key'i .env'e yazın:
+--        NEXT_PUBLIC_SUPABASE_URL=...
+--        NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+--   4. Terminali açın → ⚙️ Ayarlar sekmesinden giriş yapın.
+--      İlk oturum açılışında yerleşik portföyünüz otomatik olarak DB'ye aktarılır.
+-- ==============================================================================
+
+-- 1. TABLOLAR
+CREATE TABLE IF NOT EXISTS portfolio_positions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    symbol VARCHAR(20) NOT NULL UNIQUE,
+    asset_name VARCHAR(100) NOT NULL,
+    asset_type VARCHAR(30) NOT NULL,
+    quantity NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    unit_cost NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    target_price NUMERIC(18, 4),
+    stop_price NUMERIC(18, 4),
+    risk_score INT,
+    current_action VARCHAR(50) DEFAULT 'TUT',
+    rationale TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cash_ledger (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    movement_type VARCHAR(30) NOT NULL,
+    amount NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    balance_after NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    symbol VARCHAR(20) NOT NULL,
+    transaction_type VARCHAR(20) NOT NULL,
+    quantity NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    unit_price NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    total_amount NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    withholding_tax NUMERIC(18, 4) DEFAULT 0,
+    net_amount NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    realized_pnl NUMERIC(18, 4) DEFAULT 0,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS execution_decisions (
+    id VARCHAR(50) PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    action_type VARCHAR(50) NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'bekliyor',
+    target_price NUMERIC(18, 4),
+    stop_price NUMERIC(18, 4),
+    risk_score INT,
+    details TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS social_predictions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    predictor_handle VARCHAR(100) NOT NULL,
+    fund_code VARCHAR(20) NOT NULL,
+    predicted_return_pct NUMERIC(8, 4) NOT NULL,
+    prediction_category VARCHAR(50),
+    raw_text TEXT,
+    prediction_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    actual_return_pct NUMERIC(8, 4),
+    accuracy_score NUMERIC(5, 2),
+    status VARCHAR(30) DEFAULT 'BEKLIYOR',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Uygulama ayarları (başlangıç anaparası vb. anahtar-değer)
+CREATE TABLE IF NOT EXISTS app_settings (
+    key VARCHAR(40) PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Günlük portföy snapshot (grafikler için zaman serisi biriktirir)
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    snapshot_date DATE NOT NULL UNIQUE,
+    total_value NUMERIC(18, 2) NOT NULL,
+    cash_balance NUMERIC(18, 2) NOT NULL,
+    breakdown JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ==============================================================================
+-- 2. GÜVENLİK — RLS: SADECE OTURUM AÇMIŞ KULLANICI (auth.uid()) OKUYUP YAZABİLİR
+-- ==============================================================================
+ALTER TABLE portfolio_positions  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cash_ledger          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE execution_decisions  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE social_predictions   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_settings         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE portfolio_snapshots  ENABLE ROW LEVEL SECURITY;
+
+-- Eski herkese-açık policy'leri kaldır (varsa)
+DROP POLICY IF EXISTS "Public Access Portfolio"    ON portfolio_positions;
+DROP POLICY IF EXISTS "Public Access Cash"         ON cash_ledger;
+DROP POLICY IF EXISTS "Public Access Transactions" ON transactions;
+DROP POLICY IF EXISTS "Public Access Decisions"    ON execution_decisions;
+DROP POLICY IF EXISTS "Public Access Predictions"  ON social_predictions;
+
+-- Önceki Auth policy'lerini temizle (tekrar çalıştırılabilirlik için)
+DROP POLICY IF EXISTS "Auth Portfolio"    ON portfolio_positions;
+DROP POLICY IF EXISTS "Auth Cash"         ON cash_ledger;
+DROP POLICY IF EXISTS "Auth Transactions" ON transactions;
+DROP POLICY IF EXISTS "Auth Decisions"    ON execution_decisions;
+DROP POLICY IF EXISTS "Auth Predictions"  ON social_predictions;
+DROP POLICY IF EXISTS "Auth Settings"     ON app_settings;
+DROP POLICY IF EXISTS "Auth Snapshots"    ON portfolio_snapshots;
+
+-- Authenticated kullanıcı policy'leri
+CREATE POLICY "Auth Portfolio"    ON portfolio_positions  FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Auth Cash"         ON cash_ledger          FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Auth Transactions" ON transactions         FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Auth Decisions"    ON execution_decisions  FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Auth Predictions"  ON social_predictions   FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Auth Settings"     ON app_settings         FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Auth Snapshots"    ON portfolio_snapshots  FOR ALL TO authenticated USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+
+-- ==============================================================================
+-- 3. BAŞLANGIÇ VERİLERİ
+-- NOT: Terminal ilk oturum açılışında yerleşik portföyü otomatik aktarır;
+-- bu INSERT'ler yalnızca manuel SQL ile hızlı kurulum için buradadır.
+-- ==============================================================================
+INSERT INTO portfolio_positions (symbol, asset_name, asset_type, quantity, unit_cost, target_price, stop_price, risk_score, current_action, rationale)
+VALUES
+('BURCE', 'Burçelik Vana', 'BIST_HISSE', 3938, 40.96, 53.40, 32.50, 10, 'KADEMELİ SAT', 'Zarar eden şirket, merdivenli çıkış.'),
+('KGM', 'QNB Gümüş Fonu', 'TEFAS_FON', 25000, 2.99, 3.40, 2.60, 7, 'TUT', 'Gümüş yoğunluğu azaltıldı, stop 2.60.'),
+('TLY', 'Tera Hisse Fonu', 'TEFAS_FON', 7, 6493, 9900, 7250, 9, '2/3 ÇIKIŞ', 'OZATD %34 yoğunlaşması var. 2/3 kâr al.'),
+('DFI', 'Deniz Hisse Fonu', 'TEFAS_FON', 10400, 3.846, 6.10, 4.60, 9, 'TUT', 'Stop 4.60 korumalı.'),
+('TP2', 'Tacirler PPF', 'PPF', 24197, 1.963, 2.20, 1.96, 1, 'TUT', 'Nakit park yeri (Faiz %37).'),
+('MASFN', 'Master Finans', 'BIST_HISSE', 486, 45.68, 52.00, 39.50, 7, 'TUT', 'USD fonksiyonel para.'),
+('SARAE', 'Saray Matbaa', 'BIST_HISSE', 211, 70.00, 90.00, 68.00, 8, 'TUT', '88-97 bandı kâr al.'),
+('EKIM', 'Ekim Varlık', 'BIST_HISSE', 630, 30.26, 22.00, 18.37, 10, 'SAT', 'HBK negatif, stop 18.37.')
+ON CONFLICT (symbol) DO NOTHING;
+
+INSERT INTO cash_ledger (movement_type, amount, balance_after, description)
+VALUES ('BASLANGIC', 257706, 257706, 'Mevcut Kullanılabilir Serbest Nakit')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO execution_decisions (id, symbol, action_type, status, target_price, stop_price, risk_score, details)
+VALUES
+('kr1', 'TLY', '2/3 ÇIKIŞ', 'onaylandi', 9900, 7250, 9, 'OZATD yoğunlaşması sebebiyle 2/3 kâr realizasyonu.'),
+('kr2', 'BURCE', 'MERDİVENLİ SAT', 'bekliyor', 53.40, 32.50, 10, 'Zarar eden şirket riskini azaltmak için kademeli satış.'),
+('kr3', 'KGM', 'TUT (25.000 Pay)', 'bekliyor', 3.40, 2.60, 7, 'Gümüş yoğunlaşması azaltıldı, kalan 25.000 pay stop 2.60 ile taşınıyor.')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO app_settings (key, value)
+VALUES ('initial_capital', '678000')
+ON CONFLICT (key) DO NOTHING;
+
