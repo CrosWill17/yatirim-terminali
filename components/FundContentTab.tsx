@@ -29,6 +29,7 @@ interface Props {
   /** Veritabanı hazır değilse form devre dışı (yazma denemesi yapılmaz). */
   canWrite: boolean;
   onUpsert: (draft: FundHoldingDraft) => Promise<void>;
+  onUpsertKapPdf?: (draft: FundHoldingDraft) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onApproveProposal?: (p: FundHoldingProposal) => Promise<void>;
   onRejectProposal?: (id: string) => Promise<void>;
@@ -60,7 +61,7 @@ const EMPTY_FORM = {
  * source=manual + notes=twitter-photo, proposal approved. Red → rejected.
  * Otomatik fund_holdings yazımı YOK — sadece manuel onay ile.
  */
-export default function FundContentTab({ rows, prices, predictions = [], proposals = [], portfolioFundCodes = [], masked, canWrite, onUpsert, onDelete, onApproveProposal, onRejectProposal }: Props) {
+export default function FundContentTab({ rows, prices, predictions = [], proposals = [], portfolioFundCodes = [], masked, canWrite, onUpsert, onUpsertKapPdf, onDelete, onApproveProposal, onRejectProposal }: Props) {
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
@@ -199,14 +200,15 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
     if (!pdfResult?.holdings?.length) return;
     setPdfSaving(true);
     try {
+      const saver = onUpsertKapPdf ?? onUpsert;
       for (const h of pdfResult.holdings) {
-        await onUpsert({
+        await saver({
           fund_code: h.fund_code,
           ticker: h.ticker,
           company_name: h.company_name ?? null,
           weight_pct: h.weight_pct,
           as_of_date: h.as_of_date,
-          notes: h.notes ?? `${pdfResult.reportLabel} | KAP PDF (manuel yükleme)`,
+          notes: h.notes ?? `${pdfResult.reportLabel} | KAP PDF (ana kaynak, ham veri)`,
         });
       }
       setPdfResult(null);

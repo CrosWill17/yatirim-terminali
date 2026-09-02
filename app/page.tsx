@@ -23,7 +23,7 @@ import { ALL_FUND_CODES, TEFAS_FON_CODES, isFundCode, isPpfCode, shouldAutoResea
 import {
   loadAll, upsertPosition, upsertDecision, insertTransaction,
   insertCashMovement, insertPrediction, updatePrediction,
-  setInitialCapital, saveDailySnapshot, upsertFundHolding, upsertFundHoldingAuto, deleteFundHolding,
+  setInitialCapital, saveDailySnapshot, upsertFundHolding, upsertFundHoldingKapPdf, upsertFundHoldingAuto, deleteFundHolding,
   approveProposal, rejectProposal,
 } from '@/lib/repo';
 import type { FundHoldingProposal } from '@/lib/repo';
@@ -823,6 +823,29 @@ export default function Home() {
     });
   };
 
+  /* KAP PDF — ana kaynak, ham veri, onay gerektirmez */
+  const handleUpsertKapPdf = async (draft: FundHoldingDraft) => {
+    const ok = await track('KAP PDF kaydı', upsertFundHoldingKapPdf(draft));
+    if (!ok) return;
+    setFundHoldings((prev) => {
+      const others = prev.filter((r) => !(r.fund_code === draft.fund_code && r.ticker === draft.ticker));
+      const existing = prev.find((r) => r.fund_code === draft.fund_code && r.ticker === draft.ticker);
+      return [
+        ...others,
+        {
+          id: existing?.id ?? `kap-pdf-${Date.now()}-${draft.ticker}`,
+          fund_code: draft.fund_code,
+          ticker: draft.ticker,
+          company_name: draft.company_name ?? null,
+          weight_pct: draft.weight_pct,
+          as_of_date: draft.as_of_date,
+          source: 'kap-pdf' as const,
+          notes: draft.notes ?? 'KAP PDF (ana kaynak, ham veri)',
+        },
+      ];
+    });
+  };
+
   const handleDeleteHolding = async (id: string) => {
     const ok = await track('Fon içeriği silme', deleteFundHolding(id));
     if (ok) setFundHoldings((prev) => prev.filter((r) => r.id !== id));
@@ -1295,6 +1318,7 @@ export default function Home() {
             masked={masked}
             canWrite={dbState === 'connected'}
             onUpsert={handleUpsertHolding}
+            onUpsertKapPdf={handleUpsertKapPdf}
             onDelete={handleDeleteHolding}
             onApproveProposal={handleApproveProposal}
             onRejectProposal={handleRejectProposal}

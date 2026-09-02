@@ -107,11 +107,26 @@ async function main(): Promise<void> {
   for (const [fundCode, rows] of Array.from(loaded.entries())) {
     const tickers = rows.map((r) => r.ticker);
 
-    // 1) Manuel override'ları koru: source='manual' olan satırları bu turda DEĞİŞTİRME.
-    const { data: existing } = await supabase.from('fund_holdings').select('ticker, source').eq('fund_code', fundCode);
-    const manualTickers = new Set((existing ?? []).filter((e) => e.source === 'manual').map((e) => e.ticker));
-    const autoRows = rows.filter((r) => !manualTickers.has(r.ticker));
-    skippedManual += manualTickers.size;
+    // 1) Manuel ve KAP PDF override'ları koru: source='manual' ve 'kap-pdf' ASLA ezilmez (ham veri, onay gerektirmez)
+    //    KAP PDF ana veri kaynağıdır (kullanıcı şartı)
+    const { data: existing } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('fund_code', fundCode);
+    const protectedTickers = new Set((existing ?? []).filter((e) => ['manual', 'kap-pdf', 'calibration'].includes(e.source)).map((e) => e.ticker));
+    const autoRows = rows.filter((r) => !protectedTickers.has(r.ticker));
+    skippedManual += protectedTickers.size;
+
+    // Eğer mevcutta kap-pdf varsa ve tarihi 45 günden yeniyse, bu fonu tamamen atla (KAP ana kaynak)
+    const hasRecentKapPdf = (existing ?? []).some((e) => {
+      if (e.source !== 'kap-pdf' && e.source !== 'manual') return false;
+      if (!e.as_of_date) return false;
+      const asOf = new Date(e.as_of_date);
+      const now = new Date();
+      const diffDays = (now.getTime() - asOf.getTime()) / (1000 * 60 * 60 * 24);
+      return diffDays <= 45;
+    });
+    if (hasRecentKapPdf) {
+      console.log(`SKIP [${fundCode}]: son 45 günde KAP PDF/manual var, otomatik kaynak ezilmeyecek (KAP ana kaynak)`);
+      continue;
+    }
 
     // 2) Upsert (fund_code + ticker anahtarı)
     if (autoRows.length > 0) {
@@ -122,9 +137,9 @@ async function main(): Promise<void> {
       inserted += autoRows.length;
     }
 
-    // 3) Rapor ortadan kalkan otomatik satırları sil (manuel dokunulmaz)
+    // 3) Rapor ortadan kalkan otomatik satırları sil (manuel ve kap-pdf dokunulmaz)
     const keepSet = new Set(tickers);
-    const stale = (existing ?? []).filter((e) => e.source !== 'manual' && !keepSet.has(e.ticker));
+    const stale = (existing ?? []).filter((e) => !['manual', 'kap-pdf', 'calibration'].includes(e.source) && !keepSet.has(e.ticker));
     if (stale.length > 0) {
       const { error } = await supabase
         .from('fund_holdings')
@@ -136,7 +151,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`\nÖZET: ${inserted} satır yazıldı, ${deleted} eski satır silindi, ${skippedManual} manuel override korundu.`);
+  console.log(`\nÖZET: ${inserted} satır yazıldı, ${deleted} eski satır silindi, ${skippedManual} manuel/KAP-PDF override korundu (KAP ana kaynak).`);
 }
 
 main().catch((e) => {

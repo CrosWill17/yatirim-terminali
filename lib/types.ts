@@ -90,7 +90,8 @@ export interface MarketTicker {
 
 /**
  * Fon içeriği satırı (fund_holdings tablosu).
- * source='manual' → kullanıcı override'ı; otomatik sync job'u bu satırları ASLA ezmez.
+ * source='manual' / 'kap-pdf' → ana kaynak (ham veri, onay gerektirmez, sync ezmez)
+ * source='auto' / 'fintables' / 'rotaborsa' → ikincil kaynak, sync ezebilir
  */
 export interface FundHoldingRow {
   id: string;
@@ -99,7 +100,7 @@ export interface FundHoldingRow {
   company_name: string | null;
   weight_pct: number;
   as_of_date: string;
-  source: 'auto' | 'calibration' | 'manual';
+  source: 'auto' | 'calibration' | 'manual' | 'kap-pdf' | 'fintables' | 'rotaborsa';
   notes: string | null;
 }
 

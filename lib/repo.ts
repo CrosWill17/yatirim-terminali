@@ -160,7 +160,7 @@ export async function loadAll(): Promise<LoadResult> {
         company_name: r.company_name ?? null,
         weight_pct: Number(r.weight_pct),
         as_of_date: String(r.as_of_date ?? '').slice(0, 10),
-        source: r.source === 'manual' || r.source === 'calibration' ? r.source : 'auto',
+        source: ['manual', 'calibration', 'kap-pdf'].includes(r.source) ? r.source : 'auto',
         notes: r.notes ?? null,
       }));
     }
@@ -416,8 +416,26 @@ export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
   );
 }
 
-/** Otomatik araştırma: source='auto' — sync job'u ezebilir, manuel değil. */
-export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 'fintables' | 'rotaborsa' }): Promise<WriteResult> {
+/** KAP PDF — ana veri kaynağı (ham veri, onay gerektirmez, sync ezmez) */
+export function upsertFundHoldingKapPdf(h: FundHoldingDraft): Promise<WriteResult> {
+  return write('upsertFundHoldingKapPdf', () =>
+    supabase.from('fund_holdings').upsert(
+      {
+        fund_code: h.fund_code,
+        ticker: h.ticker,
+        company_name: h.company_name ?? null,
+        weight_pct: h.weight_pct,
+        as_of_date: h.as_of_date,
+        source: 'kap-pdf',
+        notes: h.notes ?? 'KAP PDF (ana kaynak, ham veri)',
+      },
+      { onConflict: 'fund_code,ticker' }
+    )
+  );
+}
+
+/** Otomatik araştırma: source='auto' — sync job'u ezebilir, manuel/kap-pdf değil. */
+export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 'fintables' | 'rotaborsa' | 'kap-pdf' }): Promise<WriteResult> {
   return write('upsertFundHoldingAuto', () =>
     supabase.from('fund_holdings').upsert(
       {
