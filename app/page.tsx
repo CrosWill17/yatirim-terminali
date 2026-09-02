@@ -1372,9 +1372,9 @@ export default function Home() {
                   const v = e.target.value.toUpperCase();
                   setTxSymbol(v);
                   // Otomatik tür tahmini: bilinen fon kodları → TEFAS_FON
-                  const knownFunds = ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2','KGM','TP2','TMV','PUK','TTE','PHE','PBR'];
-                  if (knownFunds.includes(v)) setTxAssetType('TEFAS_FON');
-                  else if (v === 'TP2') setTxAssetType('PPF');
+                  const knownFunds = ['TLY','DFI','THF','GUM','YZG','MJG','DMG','GMC','AK2','KGM','TMV','PUK','TTE','PHE','PBR'];
+                  if (v === 'TP2') setTxAssetType('PPF');
+                  else if (knownFunds.includes(v)) setTxAssetType('TEFAS_FON');
                   else if (assetMeta[v]?.type) setTxAssetType(assetMeta[v].type as any);
                 }} placeholder="KOD" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-sky-500 uppercase" />
                 <datalist id="tx-symbols">
