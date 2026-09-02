@@ -158,7 +158,7 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [configured, isGuest]);
 
-  /* THF ve diğer fonlar için kanonik tür senkronu — assetMeta değiştiğinde pozisyonları düzelt */
+  /* THF ve diğer fonlar için kanonik tür senkronu — assetMeta VEYA positions değiştiğinde pozisyonları düzelt */
   useEffect(() => {
     if (Object.keys(assetMeta).length === 0 || positions.length === 0) return;
     const toFix = positions.filter((pos) => {
