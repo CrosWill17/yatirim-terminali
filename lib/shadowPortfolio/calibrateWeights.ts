@@ -353,7 +353,7 @@ export function calibrateWeights(
 
   // 6. Yeni hisse girişi denemesi (residual hala büyükse)
   if (Math.abs(residualDelta) > cfg.deltaThresholdPct && candidateNewTickers.length > 0) {
-    notes.push(`Residual Δ=%${residualDelta.toFixed(4)} hala büyük, yeni hisse girişi deneniyor (${candidateNewTickers.length} aday)`);
+    notes.push(`AŞAMA 2 — Residual Δ=%${residualDelta.toFixed(4)} hala büyük, yeni hisse girişi deneniyor (${candidateNewTickers.length} aday)`);
     // En iyi yeni aday
     const bestNew = candidateNewTickers[0];
     // En kötü mevcut hisseyi bul (ondan çal)
@@ -392,6 +392,199 @@ export function calibrateWeights(
         }
       }
     }
+  }
+
+  // 6b. AŞAMA 3 — Nakit ayarı (cash R=0)
+  //     Eğer residual hala büyükse ve ortalama hisse getirisi residual ile aynı işaretliyse,
+  //     nakit azaltıp hisse artırarak (veya tersi) Δ kapatılabilir.
+  //     Nakit implicit: toplam hisse <100 ise kalan nakit.
+  if (Math.abs(residualDelta) > cfg.deltaThresholdPct) {
+    const currentTotal = Array.from(weightMap.values()).reduce((s, w) => s + w.weightPct, 0);
+    const cashWeight = cfg.targetTotalWeightPct - currentTotal; // pozitif ise nakit var, negatif ise kaldıraç (olmamalı)
+    const avgStockReturn = currentTotal > 0 ? computePredictedReturn(Array.from(weightMap.values()), stockPerformances) * 100 / currentTotal : 0;
+    // avgStockReturn: ortalama hisse getirisi (cash hariç)
+    notes.push(`AŞAMA 3 — Nakit kontrol: toplam hisse %${currentTotal.toFixed(2)} nakit %${cashWeight.toFixed(2)} avgR %${avgStockReturn.toFixed(2)} residual %${residualDelta.toFixed(4)}`);
+
+    if (Math.abs(avgStockReturn) > 0.05) {
+      // Gereken nakit kaydırma: residual*100 / avgR
+      // Pozitif residual ve pozitif avgR → nakit azalt (hisse artır)
+      // Negatif residual ve pozitif avgR → nakit artır (hisse azalt)
+      const requiredCashShift = (residualDelta * 100) / avgStockReturn;
+      // requiredCashShift pozitif ise nakitten hisseye, negatif ise hisseden nakite
+      if (requiredCashShift > 0 && cashWeight > cfg.minWeightPct) {
+        // Nakitten hisseye: mevcut hisselere oransal dağıt
+        const shift = Math.min(requiredCashShift, cashWeight, cfg.maxDailyTurnoverPct - totalTurnover, 5); // max %5 nakit oynat
+        if (shift >= cfg.minWeightPct) {
+          // Tüm hisselere oransal dağıt
+          const allW = Array.from(weightMap.values());
+          const total = allW.reduce((s, w) => s + w.weightPct, 0);
+          for (const w of allW) {
+            const add = (w.weightPct / total) * shift;
+            w.weightPct = Number((w.weightPct + add).toFixed(4));
+          }
+          const explainedCash = (shift * avgStockReturn) / 100;
+          residualDelta = Number((residualDelta - explainedCash).toFixed(6));
+          totalTurnover += shift;
+          adjustments.push({
+            ticker: 'NAKIT→HISSELER',
+            oldWeightPct: Number(cashWeight.toFixed(4)),
+            newWeightPct: Number((cashWeight - shift).toFixed(4)),
+            deltaWeightPct: Number((-shift).toFixed(4)),
+            reason: `nakit azaltma %${shift.toFixed(2)} → hisselere oransal, avgR %${avgStockReturn.toFixed(2)} explained %${explainedCash.toFixed(4)}`,
+          });
+          notes.push(`AŞAMA 3 uygulandı: nakit %${shift.toFixed(2)} → hisseler, residual now %${residualDelta.toFixed(4)}`);
+        }
+      } else if (requiredCashShift < 0) {
+        // Hisseden nakite: en iyi hisselerden kes
+        const shift = Math.min(Math.abs(requiredCashShift), cfg.maxDailyTurnoverPct - totalTurnover, 5);
+        if (shift >= cfg.minWeightPct) {
+          // En iyi performanslı hisselerden oransal kes
+          const sortedDesc = Array.from(weightMap.values()).sort((a, b) => {
+            const pa = perfMap.get(a.ticker)?.changePct ?? 0;
+            const pb = perfMap.get(b.ticker)?.changePct ?? 0;
+            return pb - pa;
+          });
+          let remaining = shift;
+          for (const w of sortedDesc) {
+            if (remaining <= 0) break;
+            const cut = Math.min(w.weightPct * 0.5, remaining); // bir hisseden max %50 kes
+            if (cut < cfg.minWeightPct) continue;
+            w.weightPct = Number((w.weightPct - cut).toFixed(4));
+            remaining -= cut;
+            totalTurnover += cut;
+          }
+          const actualCut = shift - remaining;
+          const explainedCash = (-actualCut * avgStockReturn) / 100;
+          residualDelta = Number((residualDelta - explainedCash).toFixed(6));
+          adjustments.push({
+            ticker: 'HISSELER→NAKIT',
+            oldWeightPct: Number(cashWeight.toFixed(4)),
+            newWeightPct: Number((cashWeight + actualCut).toFixed(4)),
+            deltaWeightPct: Number(actualCut.toFixed(4)),
+            reason: `hisselerden nakite %${actualCut.toFixed(2)} avgR %${avgStockReturn.toFixed(2)} explained %${explainedCash.toFixed(4)}`,
+          });
+          notes.push(`AŞAMA 3 ters: hisseler → nakit %${actualCut.toFixed(2)}, residual %${residualDelta.toFixed(4)}`);
+        }
+      }
+    }
+  }
+
+  // 6c. AŞAMA 4 — Oransal ölçekleme (mean-reversion / momentum)
+  //     Greedy pair'ler yetmediyse, tüm portföyü R_i - mean(R) skoruna göre yeniden dağıt
+  //     Formül: dW_i = k * (R_i - meanR), k = residual*100 / Σ((R_i-meanR)*R_i)
+  if (Math.abs(residualDelta) > cfg.deltaThresholdPct) {
+    notes.push(`AŞAMA 4 — Oransal ölçekleme deneniyor, residual %${residualDelta.toFixed(4)}`);
+    const perfs = Array.from(weightMap.values()).map((w) => perfMap.get(w.ticker)?.changePct ?? 0);
+    const meanR = perfs.length > 0 ? perfs.reduce((s, r) => s + r, 0) / perfs.length : 0;
+    let denom = 0;
+    for (const w of Array.from(weightMap.values())) {
+      const r = perfMap.get(w.ticker)?.changePct ?? 0;
+      denom += (r - meanR) * r;
+    }
+    if (Math.abs(denom) > 0.001) {
+      const k = (residualDelta * 100) / denom;
+      // k çok büyükse plausibility bozulur, sınırla
+      const kClamped = Math.max(Math.min(k, 0.5), -0.5); // max %0.5 * skor kadar kaydırma
+      let totalShift = 0;
+      const planned: { w: FundWeight; delta: number }[] = [];
+      for (const w of Array.from(weightMap.values())) {
+        const r = perfMap.get(w.ticker)?.changePct ?? 0;
+        const deltaW = kClamped * (r - meanR);
+        // SPK ve turnover limiti kontrolü
+        const newW = w.weightPct + deltaW;
+        if (newW < cfg.minWeightPct - cfg.epsilon || newW > cfg.maxSingleWeightPct + cfg.epsilon) continue;
+        if (Math.abs(deltaW) < cfg.minWeightPct) continue;
+        planned.push({ w, delta: deltaW });
+        totalShift += Math.abs(deltaW);
+      }
+      if (totalShift > 0 && totalShift <= cfg.maxDailyTurnoverPct - totalTurnover + cfg.epsilon) {
+        let explained = 0;
+        for (const { w, delta: dW } of planned) {
+          const old = w.weightPct;
+          w.weightPct = Number((w.weightPct + dW).toFixed(4));
+          const r = perfMap.get(w.ticker)?.changePct ?? 0;
+          explained += dW * r;
+          adjustments.push({
+            ticker: w.ticker,
+            oldWeightPct: Number(old.toFixed(4)),
+            newWeightPct: Number(w.weightPct.toFixed(4)),
+            deltaWeightPct: Number(dW.toFixed(4)),
+            reason: `oransal ölçekleme R-mean=%${(r - meanR).toFixed(2)} k=%${kClamped.toFixed(4)}`,
+          });
+        }
+        explained = explained / 100;
+        residualDelta = Number((residualDelta - explained).toFixed(6));
+        totalTurnover += totalShift;
+        notes.push(`AŞAMA 4 uygulandı: ${planned.length} hisse oransal, explained %${explained.toFixed(4)} residual %${residualDelta.toFixed(4)}`);
+      } else {
+        notes.push(`AŞAMA 4 atlandı: totalShift %${totalShift.toFixed(2)} > kalan turnover veya 0`);
+      }
+    } else {
+      notes.push(`AŞAMA 4 atlandı: denom≈0 (tüm R benzer)`);
+    }
+  }
+
+  // 6d. AŞAMA 5 — Çoklu yeni hisse girişi (residual hala büyükse)
+  if (Math.abs(residualDelta) > cfg.deltaThresholdPct && candidateNewTickers.length > 1) {
+    notes.push(`AŞAMA 5 — Çoklu yeni hisse, residual %${residualDelta.toFixed(4)}, ${candidateNewTickers.length} aday`);
+    // En kötü 2 hisseden %2'şer çalıp en iyi 2 yeni hisseye dağıt
+    const worstTwo = [...sortedByPerf].slice(0, 2);
+    const bestTwoNew = candidateNewTickers.slice(0, 2);
+    let remainingResidual = residualDelta;
+    for (let i = 0; i < Math.min(worstTwo.length, bestTwoNew.length); i++) {
+      const worst = worstTwo[i];
+      const bestNew = bestTwoNew[i];
+      const wWorst = weightMap.get(worst.weight.ticker);
+      if (!wWorst) continue;
+      const available = Math.min(maxShiftFrom(wWorst), 2); // her birinden max %2
+      if (available < 0.5) continue;
+      const rDiff = bestNew.changePct - worst.perf;
+      if (Math.abs(rDiff) < 0.2) continue;
+      const req = (remainingResidual * 100) / rDiff;
+      const shift = Math.min(req, available, 2);
+      if (shift < 0.5) continue;
+      const newW: FundWeight = {
+        ticker: bestNew.ticker.toUpperCase(),
+        weightPct: Number(shift.toFixed(4)),
+        companyName: null,
+        assetType: 'hisse',
+        prevWeightPct: 0,
+      };
+      weightMap.set(newW.ticker, newW);
+      wWorst.weightPct = Number((wWorst.weightPct - shift).toFixed(4));
+      const explained = (shift * rDiff) / 100;
+      remainingResidual = Number((remainingResidual - explained).toFixed(6));
+      residualDelta = remainingResidual;
+      totalTurnover += shift;
+      adjustments.push({
+        ticker: `${worst.weight.ticker}→${newW.ticker} (YENİ-ÇOKLU)`,
+        oldWeightPct: 0,
+        newWeightPct: newW.weightPct,
+        deltaWeightPct: newW.weightPct,
+        reason: `çoklu yeni giriş ${bestNew.ticker} R=%${bestNew.changePct.toFixed(2)}`,
+      });
+      notes.push(`AŞAMA 5: ${newW.ticker} %${shift.toFixed(2)} eklendi, residual %${residualDelta.toFixed(4)}`);
+      if (Math.abs(residualDelta) <= cfg.deltaThresholdPct) break;
+    }
+  }
+
+  // 6e. AŞAMA 6 — Final fallback (başarısız kaydırma)
+  //     Eğer buraya kadar residual hala eşik üstünde ise:
+  //     - Eski ağırlıklara dönülmez, mevcut en iyi çabayı koru ama confidence düşük
+  //     - Nedenleri logla, manuel inceleme için alert
+  //     - calibration_log'a residual ile yaz, UI'da "DÜŞÜK GÜVEN" göster
+  if (Math.abs(residualDelta) > cfg.deltaThresholdPct) {
+    notes.push(
+      `AŞAMA 6 — FALLBACK: Kaydırma BAŞARISIZ, residual Δ=%${residualDelta.toFixed(4)} > eşik %${cfg.deltaThresholdPct}. Olası nedenler:`
+    );
+    notes.push(`  - Tüm hisseler SPK %${cfg.maxSingleWeightPct} limitinde, kapasite yok`);
+    notes.push(`  - Tüm R_i benzer (rDiff≈0), kaydırma getiriyi değiştirmiyor`);
+    notes.push(`  - Günlük turnover limiti %${cfg.maxDailyTurnoverPct} aşıldı (toplam %${totalTurnover.toFixed(2)})`);
+    notes.push(`  - Yeni hisse adayları yetersiz veya R_i verisi eksik`);
+    notes.push(`  - Nakit/VİOP etkisi hesaba katılmadı, gerçek Δ nakit/VİOP kaynaklı olabilir`);
+    notes.push(`  → En iyi çaba korunuyor ama confidence düşük, manuel inceleme önerilir`);
+    // Burada eski ağırlıklara dönmüyoruz, mevcut ağırlıkları koruyoruz (en iyi çaba)
+    // Ama confidence düşük olacak, residual loglanacak
   }
 
   // 7. Son ağırlık listesini oluştur
