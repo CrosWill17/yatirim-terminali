@@ -158,6 +158,28 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [configured, isGuest]);
 
+  /* THF ve diğer fonlar için kanonik tür senkronu — assetMeta değiştiğinde pozisyonları düzelt */
+  useEffect(() => {
+    if (Object.keys(assetMeta).length === 0 || positions.length === 0) return;
+    const toFix = positions.filter((pos) => {
+      const m = assetMeta[pos.symbol];
+      return m && (pos.asset_name !== m.name || pos.asset_type !== m.type);
+    });
+    if (toFix.length === 0) return;
+    // Local state'i hemen düzelt
+    setPositions((prev) => prev.map((p) => {
+      const m = assetMeta[p.symbol];
+      return m ? { ...p, asset_name: m.name, asset_type: m.type } : p;
+    }));
+    // DB'yi de düzelt (sessiz, hata banner'ı yok)
+    toFix.forEach((pos) => {
+      const m = assetMeta[pos.symbol];
+      if (m) {
+        void upsertPosition({ ...pos, asset_name: m.name, asset_type: m.type });
+      }
+    });
+  }, [assetMeta]);
+
   /* ------- Canlı piyasa verisi: girişli kullanıcı (60 sn) --------- */
   useEffect(() => {
     if (!configured || isGuest) return; // misafir /api/market'i ÇAĞIRMAZ (P1)
