@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { Layers, Pencil, PlusCircle, Save, Trash2, MessageCircle, TrendingUp, CheckCircle, XCircle, Camera } from 'lucide-react';
+import { Layers, Pencil, PlusCircle, Save, Trash2, MessageCircle, TrendingUp, CheckCircle, XCircle, Camera, FileText, Upload, Loader2 } from 'lucide-react';
+import { supabase } from '@/lib/supabase';
 import type { FundHoldingRow, SocialPrediction } from '@/lib/types';
 import type { HoldingPrice, FundPrediction } from '@/lib/fundHoldings';
 import { computeFundPrediction, summarizeHoldingRows } from '@/lib/fundHoldings';
@@ -64,6 +65,14 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
+
+  // KAP PDF yükleme (TLY aylık raporu)
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfFundCode, setPdfFundCode] = useState('TLY');
+  const [pdfParsing, setPdfParsing] = useState(false);
+  const [pdfResult, setPdfResult] = useState<any>(null);
+  const [pdfError, setPdfError] = useState('');
+  const [pdfSaving, setPdfSaving] = useState(false);
 
   const summaries = useMemo(() => summarizeHoldingRows(rows), [rows]);
 
@@ -152,6 +161,59 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
       as_of_date: r.as_of_date,
       notes: r.notes ?? '',
     });
+  };
+
+
+  const handlePdfParse = async () => {
+    if (!pdfFile) { setPdfError('PDF dosyası seçin'); return; }
+    setPdfParsing(true);
+    setPdfError('');
+    setPdfResult(null);
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) { setPdfError('Oturum token yok — tekrar giriş yapın'); return; }
+      const fd = new FormData();
+      fd.append('file', pdfFile);
+      fd.append('fund_code', pdfFundCode.trim().toUpperCase() || 'TLY');
+      const res = await fetch('/api/fund-holdings/parse-pdf', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) {
+        setPdfError(json.error || json.reason || 'PDF parse edilemedi');
+        if (json.previewText) console.log('PDF preview', json.previewText);
+        return;
+      }
+      setPdfResult(json);
+    } catch (e) {
+      setPdfError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPdfParsing(false);
+    }
+  };
+
+  const handlePdfSaveAll = async () => {
+    if (!pdfResult?.holdings?.length) return;
+    setPdfSaving(true);
+    try {
+      for (const h of pdfResult.holdings) {
+        await onUpsert({
+          fund_code: h.fund_code,
+          ticker: h.ticker,
+          company_name: h.company_name ?? null,
+          weight_pct: h.weight_pct,
+          as_of_date: h.as_of_date,
+          notes: h.notes ?? `${pdfResult.reportLabel} | KAP PDF (manuel yükleme)`,
+        });
+      }
+      setPdfResult(null);
+      setPdfFile(null);
+    } finally {
+      setPdfSaving(false);
+    }
   };
 
   return (
@@ -413,6 +475,60 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
           </div>
         );
       })}
+
+      {/* KAP PDF Yükleme — TLY aylık dağılım raporu */}
+      <div className="bg-[#111726] border border-sky-800 rounded-lg p-5 space-y-3">
+        <h3 className="text-sm font-bold text-sky-300 flex items-center gap-2">
+          <FileText className="w-4 h-4" /> KAP PDF YÜKLE — AYLIK PORTFÖY DAĞILIM RAPORU (TLY)
+        </h3>
+        <p className="text-[10px] text-slate-400">
+          KAP'tan indirdiğin TLY_2026.xx.pdf gibi aylık raporu yükle. Sistem hisse kodlarını ve GRUP (%) ağırlıklarını otomatik çıkarır,
+          aynı ticker birden fazla lot ise toplar, %0,01 altı atar. Önizleme sonrası onayla → fund_holdings tablosuna source='kap-pdf' + manual override olarak yazar (sync ezmez).
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+          <input value={pdfFundCode} onChange={(e) => setPdfFundCode(e.target.value.toUpperCase())} placeholder="FON KODU (TLY)" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 uppercase focus:outline-none focus:border-sky-500" />
+          <input type="file" accept=".pdf,application/pdf" onChange={(e) => setPdfFile(e.target.files?.[0] ?? null)} className="bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-300 file:mr-2 file:bg-sky-800 file:text-white file:border-0 file:rounded file:px-2 file:py-1 file:text-[11px]" />
+          <button onClick={handlePdfParse} disabled={pdfParsing || !pdfFile || !canWrite} className="bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-white font-bold px-4 py-2 rounded flex items-center gap-2 justify-center">
+            {pdfParsing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />} {pdfParsing ? 'PARSE EDİLİYOR...' : 'PDF\'İ PARSE ET'}
+          </button>
+          <div className="text-[10px] text-slate-500 flex items-center">{pdfFile ? `${pdfFile.name} (${(pdfFile.size/1024).toFixed(0)} KB)` : 'PDF seçilmedi'}</div>
+        </div>
+        {pdfError && <div className="text-rose-400 text-[11px] bg-rose-950/30 border border-rose-800 rounded p-2">⚠️ {pdfError}</div>}
+        {pdfResult && (
+          <div className="space-y-3 bg-slate-900 border border-slate-800 rounded p-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-[11px]">
+                <span className="text-sky-300 font-bold">{pdfResult.code}</span>
+                <span className="text-slate-400 ml-2">📅 {pdfResult.asOfDate ?? '—'} — {pdfResult.reportLabel}</span>
+                <span className="text-slate-300 ml-2">🔢 {pdfResult.rowCount} hisse</span>
+                <span className="text-slate-300 ml-2">⚖️ Toplam %{formatPublic(pdfResult.totalWeight, { digits: 2 })}</span>
+                {pdfResult.excludedCount > 0 && <span className="text-slate-500 ml-2">🚫 {pdfResult.excludedCount} dışlandı (&lt;%0,01)</span>}
+              </div>
+              <button onClick={handlePdfSaveAll} disabled={pdfSaving || !canWrite} className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-4 py-2 rounded flex items-center gap-2">
+                {pdfSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} {pdfSaving ? 'KAYDEDİLİYOR...' : `TÜMÜNÜ KAYDET (${pdfResult.rowCount})`}
+              </button>
+            </div>
+            <div className="overflow-x-auto max-h-72 overflow-y-auto border border-slate-800 rounded">
+              <table className="w-full text-left text-[11px]">
+                <thead className="bg-[#0d121f] text-slate-400 sticky top-0">
+                  <tr><th className="p-2">HİSSE</th><th className="p-2">AD</th><th className="p-2 text-right">AĞIRLIK %</th><th className="p-2">TARİH</th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {pdfResult.holdings.map((h: any) => (
+                    <tr key={h.ticker} className="hover:bg-slate-800/30">
+                      <td className="p-2 font-bold text-sky-400">{h.ticker}</td>
+                      <td className="p-2 text-slate-300">{h.company_name ?? '—'}</td>
+                      <td className="p-2 text-right text-slate-100">%{formatPublic(h.weight_pct, { digits: 2 })}</td>
+                      <td className="p-2 text-slate-400">{h.as_of_date}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] text-slate-500">Kaydedince her satır source='manual' (kap-pdf notu ile) olur, otomatik sync ezmez. Önceki TLY kayıtları aynı ticker için güncellenir, raporda olmayan auto satırlar daha sonra fund-holdings-sync tarafından temizlenebilir (manuel korunur).</p>
+          </div>
+        )}
+      </div>
 
       {/* Manuel override formu */}
       <div className="bg-[#111726] border border-slate-800 rounded-lg p-5 space-y-3">
