@@ -71,7 +71,7 @@ sayfalarının hiçbiri görünmüyor.
   her okumaya `.eq('user_id', OWNER_ID)` eklendi. Sebep: `service_role` RLS'i
   atlar ve o bağlamda `auth.uid()` NULL'dır.
 - İki workflow'a `SUPABASE_OWNER_USER_ID` secret'ı eklendi.
-- `scripts/dbtest/rls-check.mjs` + `npm run test:db`: **32 senaryo, gerçek
+- `scripts/dbtest/rls-check.mjs` + `npm run test:db`: **38 senaryo, gerçek
   PostgreSQL'e karşı** (embedded-postgres). CI'da ayrı `rls` job'ı.
 - `lib/repo.test.ts`: 7 yeni test, tüm `onConflict` hedeflerini kilitliyor.
 
@@ -79,7 +79,7 @@ sayfalarının hiçbiri görünmüyor.
 ikinci hesap açılırsa veri karışmasın diye. Çok kullanıcılı senaryo de çalışıyor
 (bileşik tekil kısıtlar sayesinde).
 
-**Doğrulama:** `npm run test:db` → **32 geçti, 0 kaldı**; `npm test` → **192 geçti**;
+**Doğrulama:** `npm run test:db` → **38 geçti, 0 kaldı**; `npm test` → **192 geçti**;
 `typecheck` ✅; `build` ✅.
 
 **Kalan:** `app_settings` ve `portfolio_snapshots` için ayrı şema kararı
@@ -168,7 +168,7 @@ gerekmedi — bileşik anahtar yeterli oldu.
 | Faz | İş | Durum |
 |---|---|---|
 | FAZ 0 | `/api/market` token sızıntısı/fonksiyonel hatası | ✅ |
-| FAZ 1 | RLS kullanıcı yalıtımı | ✅ (03.09.2026, 32 senaryo ile doğrulandı) |
+| FAZ 1 | RLS kullanıcı yalıtımı | ✅ (03.09.2026, 38 senaryo ile doğrulandı) |
 | FAZ 2 | Canlı/seed işaretleme + minor düzeltmeler | ⬜ |
 | FAZ 3 | Sosyal doğrulama mantığı | ⬜ |
 | FAZ 4 | Hata bildirimi / veri tutarlılığı | ⬜ |

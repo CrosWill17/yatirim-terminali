@@ -249,7 +249,45 @@ try {
     VALUES ('${USER_A}','@x','TLY','2026-09-01') RETURNING id`);
   t('açık user_id ile service_role yazabiliyor', r.ok, r.ok ? '' : r.err.message);
 
-  console.log('\n=== 14. Oturumsuz (anon) hiçbir şey okuyamaz ===');
+  console.log('\n=== 14. YENİDEN ÇALIŞTIRMA KİLİDİ — kurulum dosyaları geri alınamaz ===');
+  // supabase_schema.sql / fund_holdings_migration.sql / fund_proposals_migration.sql
+  // zayıf `auth.uid() IS NOT NULL` politikalarını oluşturur. PostgreSQL izin
+  // verici politikaları OR ile birleştirdiği için, migrasyondan sonra bu
+  // dosyalardan biri yanlışlıkla tekrar koşulursa yalıtım SESSİZCE çöker.
+  // Üç dosyanın başındaki kilit bunu engellemeli.
+  const weakCount = async () =>
+    Number((await admin.query(
+      `SELECT count(*) c FROM pg_policies
+        WHERE schemaname='public'
+          AND (qual ILIKE '%IS NOT NULL%' OR with_check ILIKE '%IS NOT NULL%')`
+    )).rows[0].c);
+
+  t('migrasyondan sonra zayıf politika sayısı 0', (await weakCount()) === 0, String(await weakCount()));
+
+  for (const f of [
+    'supabase/supabase_schema.sql',
+    'supabase/supabase_fund_holdings_migration.sql',
+    'supabase/supabase_fund_proposals_migration.sql',
+  ]) {
+    try {
+      await run(f);
+      t(`${f.split('/').pop()} tekrar koşuda DURDURULDU`, false, 'çalıştı — kilit yok');
+    } catch (e) {
+      t(`${f.split('/').pop()} tekrar koşuda DURDURULDU`, /DURDURULDU/.test(e.message), e.message);
+    }
+  }
+  t('kilit denemelerinden sonra da zayıf politika 0 (yalıtım çökmedi)',
+    (await weakCount()) === 0, String(await weakCount()));
+
+  // twitter_migration politika içermez → tekrar koşulması güvenli olmalı
+  try {
+    await run('supabase/supabase_twitter_migration.sql');
+    t('twitter_migration (politika yok) tekrar koşulabilir', true);
+  } catch (e) {
+    t('twitter_migration (politika yok) tekrar koşulabilir', false, e.message);
+  }
+
+  console.log('\n=== 15. Oturumsuz (anon) hiçbir şey okuyamaz ===');
   r = await (async () => {
     const c = new Client(conn);
     await c.connect();

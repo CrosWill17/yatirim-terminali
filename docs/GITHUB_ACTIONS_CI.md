@@ -45,7 +45,7 @@ geçiş build'den sonra (gerçek bundle denetimi) koşar.
 
 `embedded-postgres` gerçek bir PostgreSQL ikilisi indirir, geçici bir cluster
 ayar ve Supabase'in `auth` şeması + `auth.uid()` fonksiyonu + `anon` /
-`authenticated` / `service_role` rolleri taklit edilir. 32 senaryo:
+`authenticated` / `service_role` rolleri taklit edilir. 38 senaryo:
 
 - 2 kullanıcı varken migrasyon bilerek durur (kim kime ait otomatik karar vermez)
 - `auth.users` boş + veri varken "önce hesabınızı oluşturun" der

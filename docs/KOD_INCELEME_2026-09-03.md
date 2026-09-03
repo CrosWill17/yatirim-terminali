@@ -298,7 +298,7 @@ Rapor teslim edildikten sonra ilk 4 madde sırayla uygulandı.
 |---|---|---|---|
 | P0-1 | Kırık build (`pdf-parse`) | ✅ | `next build` → `Compiled successfully` |
 | P0-2 | `pdf-parse` debug-mode ENOENT | ✅ | `grep -rl "05-versions-space" .next/server/` → **0 dosya** |
-| P0-3 | RLS kullanıcı yalıtımı | ✅ | `npm run test:db` → **32 geçti, 0 kaldı** |
+| P0-3 | RLS kullanıcı yalıtımı | ✅ | `npm run test:db` → **38 geçti, 0 kaldı** |
 | P1-1 | CI yok | ✅ | `.github/workflows/ci.yml` (2 job), YAML parse OK |
 | P1-2 | Auth'suz iki uç | ✅ | `curl` → ikisi de **HTTP 401** (önce 200'dü) |
 | P1-4 | `predicted_return_pct` kurulum tuzağı | ✅ | README'de 5 SQL dosyası sırayla + şema başlığında uyarı |
@@ -311,7 +311,7 @@ SQL metnine bakarak değil, **gerçek PostgreSQL'e karşı** koşularak.
 `scripts/dbtest/rls-check.mjs` (`npm run test:db`) `embedded-postgres` ile
 geçici bir cluster ayağa kaldırır, Supabase'in `auth` şemasını + `auth.uid()`
 fonksiyonunu + `anon`/`authenticated`/`service_role` rollerini taklit eder ve
-iki farklı kullanıcıyla 32 senaryo dener.
+iki farklı kullanıcıyla 38 senaryo dener.
 
 Bu harness **iki gerçek hatayı yakaladı**:
 
@@ -326,7 +326,7 @@ Bu harness **iki gerçek hatayı yakaladı**:
 
 | Dosya | İçerik |
 |---|---|
-| `scripts/dbtest/rls-check.mjs` | 32 senaryo, gerçek PostgreSQL |
+| `scripts/dbtest/rls-check.mjs` | 38 senaryo, gerçek PostgreSQL |
 | `lib/rateLimit.test.ts` | 14 test — sliding window, saat enjeksiyonlu |
 | `lib/repo.test.ts` (genişletildi) | 7 yeni test — tüm `onConflict` hedefleri kilitli |
 

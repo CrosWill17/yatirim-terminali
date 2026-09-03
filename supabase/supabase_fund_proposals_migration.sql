@@ -4,6 +4,34 @@
 -- Kurulum: Supabase SQL Editor'da bir kez çalıştırın
 -- =============================================================================
 
+
+-- ==============================================================================
+-- ⛔ YENİDEN ÇALIŞTIRMA KİLİDİ
+--
+-- supabase/supabase_rls_user_isolation.sql bir kez uygulandıysa bu dosyayı
+-- TEKRAR ÇALIŞTIRMAYIN. Bu dosya zayıf `auth.uid() IS NOT NULL` politikalarını
+-- yeniden oluşturur; PostgreSQL izin verici (permissive) politikaları OR ile
+-- birleştirdiği için o zayıf politika geri geldiğinde `auth.uid() = user_id`
+-- yalıtımı SESSİZCE çöker — hata vermez, sadece herkes herkesin verisini görür.
+--
+-- Aşağıdaki kilit bunu imkânsız kılar: user_id sütunu varsa dosya ilk satırda
+-- durur (SQL Editor tek transaction koştuğu için hiçbir şey yarım kalmaz).
+-- ==============================================================================
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name   = 'portfolio_positions'
+       AND column_name  = 'user_id'
+  ) THEN
+    RAISE EXCEPTION
+      'DURDURULDU: supabase_rls_user_isolation.sql zaten uygulanmış '
+      '(portfolio_positions.user_id mevcut). Bu dosyayı tekrar çalıştırmak zayıf '
+      '"auth.uid() IS NOT NULL" politikalarını geri getirip kullanıcı yalıtımını '
+      'SESSİZCE çökertirdi. Bu dosyayı atlayın.';
+  END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS fund_holding_proposals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   fund_code VARCHAR(10) NOT NULL,

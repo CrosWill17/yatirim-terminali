@@ -27,7 +27,7 @@
   gerçekleşen getiri girişiyle isabet puanı ve güven skoru güncellemesi.
 - **🧬 Fon içeriği** — KAP PDF'i ana kaynak (`/api/fund-holdings/parse-pdf`),
   fintables/rotaborsa otomatik sync ikincil kaynak; manuel/KAP satırları asla ezilmez.
-- **🧪 Test & CI** — **192 birim test** (Vitest) + **32 RLS yalıtım testi**
+- **🧪 Test & CI** — **192 birim test** (Vitest) + **38 RLS yalıtım testi**
   (gerçek PostgreSQL'e karşı) + GitHub Actions CI (typecheck + test + build +
   bundle sızıntı denetimi), `strict: true` TypeScript.
 
@@ -173,7 +173,7 @@ yatirim-terminali/
 - **Kullanıcı yalıtımı:** her tabloda `user_id UUID NOT NULL DEFAULT auth.uid()`,
   politikalar `auth.uid() = user_id`. Tekil kısıtlar kullanıcı bazlı bileşik
   (`user_id, symbol` vb.) → iki kullanıcı aynı sembolü tutabilir.
-  Doğrulama: `npm run test:db` (32 senaryo, gerçek PostgreSQL).
+  Doğrulama: `npm run test:db` (38 senaryo, gerçek PostgreSQL).
 - **Seed izolasyonu:** yerleşik portföy (adet/maliyet/nakit) `lib/serverSeed.ts`
   içinde sunucu-özel durur ve client bundle'a **girmez**. CI her build'de
   `.next/static/chunks/` içinde bu değerleri arar.
