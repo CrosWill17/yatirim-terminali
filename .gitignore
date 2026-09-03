@@ -36,3 +36,8 @@ __pycache__/
 
 # RLS doğrulama harness geçici PostgreSQL kümesi
 .dbtest-data/
+
+# Manuel fon içeriği verisi — kullanıcıya özel, repoya girmez
+# (repo PUBLIC: gh repo view --json isPrivate → false)
+data/
+supabase/manual_holdings_*.sql

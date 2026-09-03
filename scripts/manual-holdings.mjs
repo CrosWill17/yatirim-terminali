@@ -40,6 +40,15 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 
+/**
+ * lib/fundHoldings.ts → MIN_IMPACT_PCT ile BİREBİR aynı eşik.
+ * "Fona etkisi %0.01'in altındaki hisse hesaplamaya girmez (kullanıcı şartı)."
+ * Bu script de aynı kuralı uygular; aksi hâlde elle girilen veri, sync'in
+ * ürettiği veriden farklı bir kural setiyle yazılmış olurdu.
+ * Ayrıca weight_pct NUMERIC(8,4) olduğu için %0.00005 altı zaten 0'a yuvarlanır.
+ */
+const MIN_IMPACT_PCT = 0.01;
+
 const TICKER_RE = /^[A-Z0-9]{2,10}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CODE_RE = /^[A-Z0-9]{2,10}$/;
@@ -73,6 +82,7 @@ if (!Array.isArray(data.funds) || data.funds.length === 0) {
 /* ------------------------------------------------------------------ */
 const rows = [];
 const errors = [];
+const dropped = [];   // MIN_IMPACT_PCT altı — sessizce atılmaz, raporlanır
 
 for (const fund of data.funds) {
   const code = String(fund.fund_code ?? '').trim().toUpperCase();
@@ -104,8 +114,12 @@ for (const fund of data.funds) {
     seen.add(ticker);
 
     const w = Number(h.weight_pct);
-    if (!Number.isFinite(w) || w <= 0 || w > 100) {
+    if (!Number.isFinite(w) || w < 0 || w > 100) {
       errors.push(`${code}/${ticker}: weight_pct 0–100 arasında olmalı, gelen: '${h.weight_pct}'`);
+      continue;
+    }
+    if (w < MIN_IMPACT_PCT) {
+      dropped.push(`${code}/${ticker} (%${w})`);
       continue;
     }
     total += w;
@@ -134,6 +148,10 @@ if (errors.length > 0) {
   process.exit(1);
 }
 if (rows.length === 0) fail('geçerli satır yok');
+if (dropped.length > 0) {
+  console.log(`  ⚠️  %${MIN_IMPACT_PCT} altı olduğu için dışlanan ${dropped.length} satır (lib/fundHoldings.ts kuralı):`);
+  dropped.forEach((d) => console.log(`       - ${d}`));
+}
 
 /* ------------------------------------------------------------------ */
 /* SQL üret                                                            */
@@ -146,7 +164,9 @@ const q = (s) => (s === null ? 'NULL' : `'${String(s).replace(/'/g, "''")}'`);
  * (source ve notes her satırda aynı; INSERT'in hedef sütun sayısıyla birebir
  *  eşleşmesi şart, yoksa "INSERT has more target columns than expressions".)
  */
-const NOTES = 'manuel giriş (geçici) — scripts/manual-holdings.mjs';
+const NOTES = `manuel giriş (geçici) — scripts/manual-holdings.mjs${
+  dropped.length > 0 ? ` | dışlanan: ${dropped.length}` : ''
+}`;
 function valuesBlock(indent) {
   const pad = ' '.repeat(indent);
   return rows
