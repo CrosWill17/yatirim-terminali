@@ -10,6 +10,16 @@
  *  - Supabase yapılandırılmadıysa hiçbir şey "çalışıyor" gibi gösterilmez:
  *    kind='setup' hatası döner.
  *
+ * KULLANICI YALITIMI (supabase/supabase_rls_user_isolation.sql):
+ *  - Her tabloda `user_id UUID NOT NULL DEFAULT auth.uid()` var. Tarayıcı
+ *    oturumunun JWT'si PostgREST'e gittiği için user_id OTOMATİK dolar —
+ *    bu yüzden payload'larda user_id GÖNDERMİYORUZ (göndersek de RLS
+ *    WITH CHECK başkasının id'sini reddeder).
+ *  - `onConflict` hedefleri bu yüzden BİLEŞİK: 'user_id,symbol' vb.
+ *    Tekil kısıtlar kullanıcı bazlı; iki kullanıcı aynı sembolü tutabilir.
+ *  - Okumalarda .eq('user_id', ...) YOK: RLS zaten süzer, ekstra filtre
+ *    yanlışı gizler.
+ *
  * YAZMA HEDEFLERİ: her fonksiyon yalnızca kendi tablosuna yazar.
  */
 
@@ -283,7 +293,7 @@ export function upsertPosition(p: Position): Promise<WriteResult> {
         current_action: p.current_action,
         rationale: p.rationale,
       },
-      { onConflict: 'symbol' }
+      { onConflict: 'user_id,symbol' }
     )
   );
 }
@@ -302,7 +312,7 @@ export function upsertDecision(d: Decision): Promise<WriteResult> {
         details: d.details,
         created_at: d.created_at,
       },
-      { onConflict: 'id' }
+      { onConflict: 'user_id,id' }
     )
   );
 }
@@ -369,7 +379,11 @@ export function updatePrediction(p: SocialPrediction): Promise<WriteResult> {
 
 export function setInitialCapital(value: number): Promise<WriteResult> {
   return write('setInitialCapital', () =>
-    supabase.from('app_settings').upsert({ key: 'initial_capital', value: String(value) })
+    supabase.from('app_settings').upsert(
+      { key: 'initial_capital', value: String(value) },
+      // app_settings'in PK'si artık bileşik: (user_id, key)
+      { onConflict: 'user_id,key' }
+    )
   );
 }
 
@@ -382,7 +396,7 @@ export function saveDailySnapshot(
   return write('saveDailySnapshot', () =>
     supabase.from('portfolio_snapshots').upsert(
       { snapshot_date: date, total_value: totalValue, cash_balance: cashBalance, breakdown },
-      { onConflict: 'snapshot_date' }
+      { onConflict: 'user_id,snapshot_date' }
     )
   );
 }
@@ -411,7 +425,7 @@ export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
         source: 'manual',
         notes: h.notes ?? 'manuel override (UI)',
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
@@ -429,7 +443,7 @@ export function upsertFundHoldingKapPdf(h: FundHoldingDraft): Promise<WriteResul
         source: 'kap-pdf',
         notes: h.notes ?? 'KAP PDF (ana kaynak, ham veri)',
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
@@ -447,7 +461,7 @@ export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 
         source: (h as any).source ?? 'auto',
         notes: h.notes ?? 'otomatik araştırma (fintables/rotaborsa)',
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }

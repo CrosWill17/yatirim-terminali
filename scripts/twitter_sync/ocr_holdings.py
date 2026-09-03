@@ -179,10 +179,26 @@ def main():
         sys.exit(1)
 
     # Supabase client
+    #
+    # owner_id (auth.users.id): service_role RLS'i ATLAR ve auth.uid() bu
+    # bağlamda NULL'dır; fund_holding_proposals.user_id ise NOT NULL.
+    # Yani bu job satırları KİMİN adına yazdığını açıkça bilmek zorunda.
     supa_url = os.environ.get("SUPABASE_URL", "")
     supa_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    owner_id = os.environ.get("SUPABASE_OWNER_USER_ID", "")
     sb = None
     if not DRY_RUN and SUPA_AVAILABLE and supa_url and supa_key:
+        if not re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            owner_id, re.I,
+        ):
+            print(
+                "HATA: SUPABASE_OWNER_USER_ID eksik veya UUID değil. "
+                "supabase/supabase_rls_user_isolation.sql sonrası her satır bir "
+                "kullanıcıya ait. Değer: Supabase → Authentication → Users → UUID.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         sb = create_client(supa_url, supa_key)
 
     total_proposals = []
@@ -231,6 +247,7 @@ def main():
                 if h["weight_pct"] < 0.01:
                     continue
                 total_proposals.append({
+                    "user_id": owner_id,
                     "fund_code": fund_code,
                     "ticker": h["ticker"],
                     "weight_pct": h["weight_pct"],
@@ -240,10 +257,11 @@ def main():
                     "raw_text": f"{text[:200]} | OCR: {ocr_text[:300]}",
                 })
 
-    # Deduplicate proposals: fund_code+ticker+source_tweet_id unique
+    # Deduplicate proposals: tekil anahtar artık BİLEŞİK
+    # (user_id, fund_code, ticker, source_tweet_id)
     dedup = {}
     for p in total_proposals:
-        key = (p["fund_code"], p["ticker"], p["source_tweet_id"])
+        key = (p["user_id"], p["fund_code"], p["ticker"], p["source_tweet_id"])
         dedup[key] = p
     total_proposals = list(dedup.values())
 
@@ -257,7 +275,7 @@ def main():
         if total_proposals:
             # Upsert pending proposals
             try:
-                res = sb.table("fund_holding_proposals").upsert(total_proposals, on_conflict="fund_code,ticker,source_tweet_id").execute()
+                res = sb.table("fund_holding_proposals").upsert(total_proposals, on_conflict="user_id,fund_code,ticker,source_tweet_id").execute()
                 # Supabase-py hata fırlatmaz, data/error döner — basit kontrol
                 if hasattr(res, 'data'):
                     print(f"ÖZET: {len(tweets)} tweet → {len(total_proposals)} öneri yazıldı (fund_holding_proposals)")

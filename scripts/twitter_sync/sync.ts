@@ -68,6 +68,13 @@ async function main(): Promise<void> {
   const AUTO_VERIFY = process.env.AUTO_VERIFY !== '0';
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  /**
+   * Satırların sahibi (auth.users.id). service_role RLS'i atlar ve auth.uid()
+   * bu bağlamda NULL'dır; social_predictions.user_id ise NOT NULL. Ayrıca tüm
+   * okumalar bu id ile daraltılır — yoksa job başka kullanıcıların açık
+   * tahminlerini de görüp eşleştirmeye kalkardı.
+   */
+  const ownerId = process.env.SUPABASE_OWNER_USER_ID ?? '';
 
   let tweets: TweetRow[];
   try {
@@ -82,6 +89,14 @@ async function main(): Promise<void> {
   }
   if (!DRY_RUN && (!url || !key)) {
     console.error('HATA: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY eksik (önizleme için DRY_RUN=1).');
+    process.exit(1);
+  }
+  if (!DRY_RUN && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ownerId)) {
+    console.error(
+      'HATA: SUPABASE_OWNER_USER_ID eksik veya UUID değil.\n' +
+      '  supabase/supabase_rls_user_isolation.sql sonrası her satır bir kullanıcıya ait.\n' +
+      '  Değer: Supabase → Authentication → Users → kendi hesabınızın UUID\'si.'
+    );
     process.exit(1);
   }
   const sb: SupabaseClient | null = DRY_RUN ? null : createClient(url as string, key as string, {
@@ -177,6 +192,7 @@ async function main(): Promise<void> {
     const { data: existing, error: e1 } = await sb
       .from(TABLO)
       .select('source_tweet_id')
+      .eq('user_id', ownerId)
       .in('source_tweet_id', tweetSourceIds);
     if (e1) { console.error('HATA (mevcut id sorgusu):', e1.message); process.exit(1); }
     (existing ?? []).forEach((r: any) => r.source_tweet_id && existingIds.add(r.source_tweet_id));
@@ -187,6 +203,7 @@ async function main(): Promise<void> {
       const { data: openRows, error: e2 } = await sb
         .from(TABLO)
         .select('source_tweet_id, fund_code, prediction_date, predicted_return_pct')
+        .eq('user_id', ownerId)
         .eq('status', 'BEKLIYOR')
         .is('actual_return_pct', null)
         .in('fund_code', funds)
@@ -250,13 +267,14 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(verifyOps, null, 2));
   } else if (sb) {
     if (fresh.length > 0) {
-      const { error: e3 } = await sb.from(TABLO).insert(fresh);
+      const { error: e3 } = await sb.from(TABLO).insert(fresh.map((r) => ({ ...r, user_id: ownerId })));
       if (e3) { console.error('HATA (insert):', e3.message); process.exit(1); }
     }
     for (const v of verifyOps) {
       const { error: e4 } = await sb
         .from(TABLO)
         .update({ actual_return_pct: v.actual, accuracy_score: v.acc, status: 'DOGRULANDI' })
+        .eq('user_id', ownerId)
         .eq('source_tweet_id', v.source_tweet_id);
       if (e4) { console.error('HATA (update):', e4.message); process.exit(1); }
     }

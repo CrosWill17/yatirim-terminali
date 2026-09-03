@@ -1,16 +1,38 @@
 -- ==============================================================================
--- YATIRIM TERMİNALİ v3.1 — SUPABASE VERİTABANI ŞEMASI (v2 — AUTH GÜVENCELİ RLS)
+-- YATIRIM TERMİNALİ — SUPABASE VERİTABANI ŞEMASI (1/5)
+--
+-- ⚠️⚠️⚠️  BU DOSYA TEK BAŞINA YETERLİ DEĞİL  ⚠️⚠️⚠️
+--
+-- Bu dosyanın RLS politikaları `auth.uid() IS NOT NULL` der — yani "giriş
+-- yapmış HERHANGİ BİRİ". Site herkese açık olduğu için bu, yalıtım DEĞİLDİR:
+-- hesap açan herkes tüm portföyü okuyup silebilir.
+--
+-- Gerçek kullanıcı yalıtımı için 5. dosyayı MUTLAKA çalıştırın:
+--   supabase/supabase_rls_user_isolation.sql
+--
+-- SIRA (hepsi zorunlu):
+--   1. supabase_schema.sql                        ← buradasınız
+--   2. supabase_fund_holdings_migration.sql
+--   3. supabase_twitter_migration.sql
+--   4. supabase_fund_proposals_migration.sql
+--   5. supabase_rls_user_isolation.sql            ← user_id + auth.uid() = user_id
 --
 -- Kurulum:
 --   1. supabase.com → yeni proje → SQL Editor → bu dosyanın tamamını çalıştır.
 --   2. Authentication → Providers → Email AÇIK.
---      (Kişisel terminal için "Confirm email" KAPALI önerilir; açık bırakırsanız
---       terminaldeki "Hesap Oluştur" sonrası e-postanızdaki onay linkine tıklayın.)
+--      ⚠️ Bu şema 8 satır yerleşik portföy INSERT eder. 5. dosya o satırları bir
+--      kullanıcıya atamak zorunda; auth.users BOŞSA "önce hesabınızı oluşturun"
+--      hatası vererek durur. Yani: ÖNCE hesabınızı açın, SONRA 5. dosyayı koşun.
 --   3. Project Settings → API → URL ve anon key'i .env'e yazın:
 --        NEXT_PUBLIC_SUPABASE_URL=...
 --        NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 --   4. Terminali açın → ⚙️ Ayarlar sekmesinden giriş yapın.
 --      İlk oturum açılışında yerleşik portföyünüz otomatik olarak DB'ye aktarılır.
+--
+-- Doğrulama (5. dosyadan sonra):
+--   SELECT tablename, policyname, qual FROM pg_policies WHERE schemaname='public';
+--   → her satırda ((auth.uid() = user_id)) görünmeli, IS NOT NULL görünmemeli.
+--   Ya da:  npm run test:db
 -- ==============================================================================
 
 -- 1. TABLOLAR

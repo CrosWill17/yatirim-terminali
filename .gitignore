@@ -33,3 +33,6 @@ coverage/
 data/
 __pycache__/
 *.pyc
+
+# RLS doğrulama harness geçici PostgreSQL kümesi
+.dbtest-data/
