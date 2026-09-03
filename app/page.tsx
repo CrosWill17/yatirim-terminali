@@ -201,7 +201,8 @@ export default function Home() {
   /* ------- Dinamik pozisyon fiyatları: yeni eklenen hisse/fon otomatik fiyat (5dk backoff) --------- */
   const failedQuotesRef = useRef<Record<string, number>>({});
   useEffect(() => {
-    if (!configured || isGuest || positions.length === 0) return;
+    // /api/market/quotes artık oturum istiyor (auth'suz scrape proxy'si olmasın)
+    if (!configured || isGuest || positions.length === 0 || !accessToken) return;
     const now = Date.now();
     const BACKOFF_MS = 5 * 60 * 1000; // fail ederse 5dk bekle
     // market.positions'da olmayan semboller (yeni eklenenler) — backoff'lu
@@ -213,7 +214,9 @@ export default function Home() {
     if (missing.length === 0) return;
     let cancelled = false;
     // Fon + hisse karışık — /api/market/quotes artık fonaly + Yahoo deniyor
-    fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`)
+    fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d?.quotes) {
@@ -256,7 +259,7 @@ export default function Home() {
         missing.forEach((c) => { failedQuotesRef.current[c] = now; });
       });
     return () => { cancelled = true; };
-  }, [positions, market.positions, configured, isGuest]);
+  }, [positions, market.positions, configured, isGuest, accessToken]);
 
   /* ------------------- Yazma takibi (P0) -------------------------- */
   const pendingRef = useRef(0);
@@ -384,9 +387,12 @@ export default function Home() {
   /* --------- Fon hisse fiyatları (P3 — günlük tahmin/etki) -------- */
   useEffect(() => {
     if (isGuest || fundHoldings.length === 0) { setHoldingPrices({}); return; }
+    if (!accessToken) return; // oturum yoksa uç 401 döner — boşa istek atma
     const codes = Array.from(new Set(fundHoldings.map((h) => h.ticker)));
     let cancelled = false;
-    fetch(`/api/market/quotes?symbols=${encodeURIComponent(codes.join(','))}`)
+    fetch(`/api/market/quotes?symbols=${encodeURIComponent(codes.join(','))}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d?.quotes) return;
@@ -401,7 +407,7 @@ export default function Home() {
       })
       .catch(() => { /* fiyatı eksik hisse → katkı 0 (VERİ EKSİK) */ });
     return () => { cancelled = true; };
-  }, [fundHoldings, isGuest]);
+  }, [fundHoldings, isGuest, accessToken]);
 
   /* --------- Yeni fonlar için içerik otomatik araştırma (P3 genişletme) -------- */
   const researchingRef = React.useRef<Set<string>>(new Set());
@@ -755,7 +761,11 @@ export default function Home() {
     try {
       const res = await fetch('/api/social-parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // /api/social-parse oturum doğruluyor (auth'suz dönemde handle sabiti sızıyordu)
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         body: JSON.stringify({ text: tweetInput }),
       });
       const data = await res.json();

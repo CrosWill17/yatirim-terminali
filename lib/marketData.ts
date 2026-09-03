@@ -354,9 +354,72 @@ async function fetchLiveQuotes(): Promise<LiveQuotes> {
 /* Orkestrasyon: live dene → başarısızsa seed'e düş                    */
 /* ------------------------------------------------------------------ */
 
-const CACHE_TTL_MS = 60_000; // 60 sn — hem BIST hem TEFAS için uygun ritim
+const CACHE_TTL_MS = 60_000; // 60 sn — BIST hisseleri için uygun ritim
+
+/**
+ * TEFAS fon NAV'ı GÜNDE BİR açıklanır; gün içinde tekrar çekmek gereksizdir ve
+ * fonaly'ye boşuna yük bindirir (ban riski). Bu yüzden başarılı sonuç 24 saat
+ * cache'lenir.
+ *
+ * ⚠️ Başarısız sonuç (null) BİLEREK kısa cache'lenir: fonaly geçici olarak
+ * ulaşılamazsa ve 24 saat cache'lersek arayüz tüm gün "VERİ EKSİK" gösterirdi.
+ */
+const FUND_CACHE_TTL_MS = 24 * 3600 * 1000;
+const FUND_NEG_TTL_MS = 5 * 60_000;
+
+/**
+ * Tek istekte çözülecek en fazla kod.
+ *
+ * Eskiden 60'tı ve bu bir HATAYDI: fund_holdings'te 100+ satır olduğunda
+ * (THF 77 + TLY 30 + DFI 4) arayüz hepsini soruyor, sunucu 60'a kırpıyordu.
+ * Kırpılan kodlar için fiyat null dönüyor ve arayüzde etki sütunu "—" kalıyordu
+ * — hem de hiçbir uyarı vermeden.
+ *
+ * Tavan tamamen kaldırılmıyor: bu uç dışarıya scrape isteği atıyor, sınırsız
+ * liste Yahoo/fonaly tarafından IP ban'ıyla sonuçlanır. 300 gerçekçi bir üst
+ * sınır (üç fonun tam içeriği + pay).
+ */
+const QUOTE_LIMIT = 300;
+
+/**
+ * Dış kaynağa aynı anda kaç istek atılabilir.
+ *
+ * Önceki kod `Promise.all(missing.map(...))` ile TÜM kodları aynı anda
+ * ateşliyordu — 100 kod = Yahoo'ya 100 eşzamanlı istek. Bu ban davetiyesidir.
+ * Kuyruk 6 eşzamanlılıkla sınırlanır.
+ */
+const FETCH_CONCURRENCY = 6;
+
 let cache: { data: MarketData; at: number } | null = null;
 let inFlight: Promise<MarketData> | null = null;
+
+/**
+ * Eşzamanlılığı sınırlı map. Sırayı korur (out[i] items[i]'ye karşılık gelir).
+ * `fn` hata fırlatırsa o öğe `fallback` olur — tek kodun hatası tüm partiyi
+ * düşürmemeli.
+ */
+async function mapLimited<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+  fallback: R
+): Promise<R[]> {
+  const out: R[] = new Array(items.length).fill(fallback);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        out[i] = await fn(items[i], i);
+      } catch {
+        out[i] = fallback;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
 
 function assembleIndices(base: MarketData, live: LiveQuotes): MarketData['indices'] {
   const xu100 = live.indices.xu100 ?? base.indices.xu100;
@@ -528,7 +591,7 @@ export async function getStockQuotes(codes: string[]): Promise<Record<string, Ma
         .map((c) => c.trim().toUpperCase())
         .filter((c) => /^[A-Z0-9]{2,10}$/.test(c))
     )
-  ).slice(0, 60);
+  ).slice(0, QUOTE_LIMIT);
 
   const out: Record<string, MarketQuote | null> = {};
   const missing: string[] = [];
@@ -540,16 +603,30 @@ export async function getStockQuotes(codes: string[]): Promise<Record<string, Ma
   if (missing.length === 0) return out;
 
   if (!stockInFlight) stockInFlight = new Map();
-  const jobs = missing.map(async (c) => {
-    const pending = stockInFlight?.get(c);
-    if (pending) return [c, await pending] as const;
-    const p = fetchYahooQuote(toYahooSymbol(c));
-    stockInFlight?.set(c, p);
-    return [c, await p] as const;
-  });
+  const flight = stockInFlight;
 
-  const settled = await Promise.all(jobs);
-  for (const [code, q] of settled) {
+  // Eşzamanlılık sınırlı: 100 kod için Yahoo'ya 100 istek birden atmak ban
+  // sebebidir. inFlight haritası aynı koda eşzamanlı ikinci isteği de engeller.
+  const settled = await mapLimited<string, readonly [string, MarketQuote | null] | null>(
+    missing,
+    FETCH_CONCURRENCY,
+    async (c) => {
+      const pending = flight.get(c);
+      if (pending) return [c, await pending] as const;
+      const p = fetchYahooQuote(toYahooSymbol(c));
+      flight.set(c, p);
+      try {
+        return [c, await p] as const;
+      } finally {
+        flight.delete(c);
+      }
+    },
+    null
+  );
+
+  for (const item of settled) {
+    if (!item) continue;
+    const [code, q] = item;
     stockCache.set(code, { q, at: Date.now() });
     out[code] = q;
   }
@@ -569,33 +646,59 @@ export async function getFundQuotes(codes: string[]): Promise<Record<string, Mar
     new Set(
       codes.map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z0-9]{2,10}$/.test(c))
     )
-  ).slice(0, 60);
+  ).slice(0, QUOTE_LIMIT);
 
   const out: Record<string, MarketQuote | null> = {};
   const missing: string[] = [];
   for (const c of wanted) {
     const hit = fundNavCache.get(c);
-    if (hit && Date.now() - hit.at < CACHE_TTL_MS) out[c] = hit.q;
+    // Başarılı sonuç 24 saat, başarısız 5 dakika cache'lenir (bkz. FUND_CACHE_TTL_MS).
+    const ttl = hit && hit.q ? FUND_CACHE_TTL_MS : FUND_NEG_TTL_MS;
+    if (hit && Date.now() - hit.at < ttl) out[c] = hit.q;
     else missing.push(c);
   }
   if (missing.length === 0) return out;
 
   if (!fundNavInFlight) fundNavInFlight = new Map();
-  const jobs = missing.map(async (c) => {
-    const pending = fundNavInFlight?.get(c);
-    if (pending) return [c, await pending] as const;
-    const p = fetchFonalyQuote(c);
-    fundNavInFlight?.set(c, p);
-    return [c, await p] as const;
-  });
+  const flight = fundNavInFlight;
 
-  const settled = await Promise.all(jobs);
-  for (const [code, q] of settled) {
+  const settled = await mapLimited<string, readonly [string, MarketQuote | null] | null>(
+    missing,
+    FETCH_CONCURRENCY,
+    async (c) => {
+      const pending = flight.get(c);
+      if (pending) return [c, await pending] as const;
+      const p = fetchFonalyQuote(c);
+      flight.set(c, p);
+      try {
+        return [c, await p] as const;
+      } finally {
+        flight.delete(c);
+      }
+    },
+    null
+  );
+
+  for (const item of settled) {
+    if (!item) continue;
+    const [code, q] = item;
     fundNavCache.set(code, { q, at: Date.now() });
     out[code] = q;
   }
   fundNavInFlight = null;
   return out;
+}
+
+/**
+ * Test/teşhis için cache'leri sıfırlar. Üretimde çağrılmaz.
+ * TTL davranışını test etmek için gerekli — aksi hâlde modül-durumu testler
+ * arasında sızıyor.
+ */
+export function __resetQuoteCaches(): void {
+  stockCache.clear();
+  fundNavCache.clear();
+  stockInFlight = null;
+  fundNavInFlight = null;
 }
 
 /**
@@ -606,7 +709,7 @@ export async function getFundQuotes(codes: string[]): Promise<Record<string, Mar
 export async function getMixedQuotes(codes: string[]): Promise<Record<string, MarketQuote | null>> {
   const wanted = Array.from(
     new Set(codes.map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z0-9]{2,10}$/.test(c)))
-  ).slice(0, 60);
+  ).slice(0, QUOTE_LIMIT);
 
   const [stockQs, fundQs] = await Promise.all([getStockQuotes(wanted), getFundQuotes(wanted)]);
 

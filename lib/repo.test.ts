@@ -7,6 +7,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const mock = vi.hoisted(() => ({
   error: null as { message: string; code?: string; status?: number } | null,
@@ -229,7 +231,7 @@ describe('P0 — fon içeriği yazma hedefi yalnız fund_holdings', () => {
 });
 
 describe('P3 — manuel override kaynağı korunur', () => {
-  it("upsertFundHolding source='manual' yazar ve (fund_code,ticker) üzerinde çakışma çözer", async () => {
+  it("upsertFundHolding source='manual' yazar ve (user_id,fund_code,ticker) üzerinde çakışma çözer", async () => {
     await upsertFundHolding({
       fund_code: 'DFI', ticker: 'TUPRS', company_name: 'Türkiye Petrol Rafinerileri A.Ş.',
       weight_pct: 12.5, as_of_date: '2026-07-31', notes: 'elle girildi',
@@ -240,7 +242,7 @@ describe('P3 — manuel override kaynağı korunur', () => {
     expect(call!.payload.fund_code).toBe('DFI');
     expect(call!.payload.ticker).toBe('TUPRS');
     expect(call!.payload.weight_pct).toBeCloseTo(12.5, 4);
-    expect(call!.options).toEqual({ onConflict: 'fund_code,ticker' });
+    expect(call!.options).toEqual({ onConflict: 'user_id,fund_code,ticker' });
   });
 
   it('pozisyon yazması yalnız portfolio_positions tablosuna gider', async () => {
@@ -254,5 +256,63 @@ describe('P3 — manuel override kaynağı korunur', () => {
     await insertPrediction(pred);
     const tables = new Set(mock.payloads.map((c) => c.table));
     expect(Array.from(tables)).toEqual(['social_predictions']);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* P0 — KULLANICI YALITIMI: BİLEŞİK ÇAKIŞMA HEDEFLERİ                  */
+/*                                                                    */
+/* supabase/supabase_rls_user_isolation.sql tekil kısıtları kullanıcı  */
+/* bazlı bileşiğe çevirdi. repo.ts'in onConflict hedefleri buna        */
+/* UYMAZSA upsert'ler "there is no unique or exclusion constraint       */
+/* matching the ON CONFLICT specification" ile patlar — bu yüzden her  */
+/* hedef burada kilitlenir.                                            */
+/* ------------------------------------------------------------------ */
+
+describe('P0 — kullanıcı yalıtımı: onConflict hedefleri bileşik', () => {
+  const conflictOf = (table: string, op = 'upsert') =>
+    mock.payloads.find((c) => c.table === table && c.op === op)?.options?.onConflict;
+
+  it('upsertPosition → user_id,symbol', async () => {
+    await upsertPosition(pos);
+    expect(conflictOf('portfolio_positions')).toBe('user_id,symbol');
+  });
+
+  it('upsertDecision → user_id,id', async () => {
+    await upsertDecision(dec);
+    expect(conflictOf('execution_decisions')).toBe('user_id,id');
+  });
+
+  it('setInitialCapital → user_id,key (app_settings bileşik PK)', async () => {
+    await setInitialCapital(678000);
+    expect(conflictOf('app_settings')).toBe('user_id,key');
+  });
+
+  it('saveDailySnapshot → user_id,snapshot_date', async () => {
+    await saveDailySnapshot('2026-09-03', 700000, 250000, { BURCE: 1 });
+    expect(conflictOf('portfolio_snapshots')).toBe('user_id,snapshot_date');
+  });
+
+  it('upsertFundHolding → user_id,fund_code,ticker', async () => {
+    await upsertFundHolding({ fund_code: 'DFI', ticker: 'TUPRS', weight_pct: 12.5, as_of_date: '2026-07-31' });
+    expect(conflictOf('fund_holdings')).toBe('user_id,fund_code,ticker');
+  });
+
+  it('payload\'larda user_id GÖNDERİLMEZ (DB DEFAULT auth.uid() doldurur)', async () => {
+    await upsertPosition(pos);
+    await upsertDecision(dec);
+    await insertTransaction(txn);
+    await insertCashMovement(cash);
+    await insertPrediction(pred);
+    await upsertFundHolding({ fund_code: 'DFI', ticker: 'TUPRS', weight_pct: 1, as_of_date: '2026-07-31' });
+    for (const c of mock.payloads) {
+      expect(c.payload && 'user_id' in c.payload, `${c.table} payload'ında user_id var`).toBe(false);
+    }
+  });
+
+  it('loadAll okumalarında elle user_id filtresi YOK (RLS zaten süzer)', async () => {
+    const src = readFileSync(join(__dirname, 'repo.ts'), 'utf8');
+    const body = src.slice(src.indexOf('export async function loadAll'));
+    expect(body.includes(".eq('user_id'")).toBe(false);
   });
 });
