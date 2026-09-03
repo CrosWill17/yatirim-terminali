@@ -35,6 +35,7 @@ const TMP = join(REPO, 'node_modules', '.pgtest-manual');
 /** Yeni bir manuel veri dosyası eklerken buraya da ekleyin. */
 const CASES = [
   { label: 'Tera Portföy THF+TLY — Ağustos 2026 KAP raporu', json: 'data/tera_holdings_2026-08.json' },
+  { label: 'Atlas Portföy DFI — Ağustos 2026 KAP raporu (yalnızca hisseler)', json: 'data/atlas_dfi_2026-08.json' },
 ];
 
 const USER_A = '11111111-1111-1111-1111-111111111111';
