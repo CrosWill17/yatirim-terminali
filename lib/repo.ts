@@ -26,7 +26,7 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import {
   Position, Decision, Transaction, CashMovement, SocialPrediction,
-  FundHoldingRow, RepoError, RepoErrorKind, WriteResult,
+  FundAssetType, FundHoldingRow, RepoError, RepoErrorKind, WriteResult,
 } from './types';
 
 function enabled(): boolean {
@@ -172,6 +172,8 @@ export async function loadAll(): Promise<LoadResult> {
         as_of_date: String(r.as_of_date ?? '').slice(0, 10),
         source: ['manual', 'calibration', 'kap-pdf'].includes(r.source) ? r.source : 'auto',
         notes: r.notes ?? null,
+        // Migration koşmadıysa sütun döndürülmez → 'HISSE' varsay (eski davranış).
+        asset_type: r.asset_type ?? 'HISSE',
       }));
     }
 
@@ -410,6 +412,23 @@ export interface FundHoldingDraft {
   weight_pct: number;
   as_of_date: string;
   notes?: string | null;
+  /**
+   * Varlık sınıfı. Verilmezse 'HISSE'.
+   * ÖNEMLİ: yalnızca supabase_fund_asset_type_migration.sql koştuysa gönderilir —
+   * aksi hâlde supabase "column asset_type does not exist" der ve YAZMA PATLAR.
+   * Bu yüzden assetTypePayload() sütunun var olup olmadığını bilmediğimiz
+   * durumlarda alanı hiç eklemiyor; DB'deki DEFAULT 'HISSE' devreye giriyor.
+   */
+  asset_type?: FundAssetType;
+}
+
+/**
+ * asset_type migration'ı geriye dönük uyumlu olsun diye: tip verilmediyse
+ * payload'a alanı HİÇ koyma. Böylece migration koşmamış projelerde eski
+ * davranış aynen sürer.
+ */
+function assetTypePayload(h: FundHoldingDraft): Record<string, string> {
+  return h.asset_type ? { asset_type: h.asset_type } : {};
 }
 
 /** Manuel override: source='manual' — otomatik sync job'u bu satırı asla ezmez. */
@@ -424,6 +443,7 @@ export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
         as_of_date: h.as_of_date,
         source: 'manual',
         notes: h.notes ?? 'manuel override (UI)',
+        ...assetTypePayload(h),
       },
       { onConflict: 'user_id,fund_code,ticker' }
     )
@@ -442,6 +462,7 @@ export function upsertFundHoldingKapPdf(h: FundHoldingDraft): Promise<WriteResul
         as_of_date: h.as_of_date,
         source: 'kap-pdf',
         notes: h.notes ?? 'KAP PDF (ana kaynak, ham veri)',
+        ...assetTypePayload(h),
       },
       { onConflict: 'user_id,fund_code,ticker' }
     )
@@ -460,6 +481,7 @@ export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 
         as_of_date: h.as_of_date,
         source: (h as any).source ?? 'auto',
         notes: h.notes ?? 'otomatik araştırma (fintables/rotaborsa)',
+        ...assetTypePayload(h),
       },
       { onConflict: 'user_id,fund_code,ticker' }
     )

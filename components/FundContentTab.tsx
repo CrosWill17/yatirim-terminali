@@ -7,6 +7,7 @@ import type { FundHoldingRow, SocialPrediction } from '@/lib/types';
 import type { HoldingPrice, FundPrediction } from '@/lib/fundHoldings';
 import { computeFundPrediction, summarizeHoldingRows } from '@/lib/fundHoldings';
 import { formatPublic } from '@/lib/mask';
+import { TÜR_LABEL } from '@/lib/assetMeta';
 import { shouldAutoResearchFund } from '@/lib/fundCodes';
 import type { FundHoldingProposal } from '@/lib/repo';
 
@@ -413,7 +414,7 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#0d121f] text-slate-400 border-b border-slate-800">
                   <tr>
-                    <th className="p-3">HİSSE</th>
+                    <th className="p-3">VARLIK</th>
                     <th className="p-3">RESMÎ AD</th>
                     <th className="p-3 text-right">AĞIRLIK %</th>
                     <th className="p-3 text-right">GÜNLÜK %</th>
@@ -430,7 +431,17 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
                       : null;
                     return (
                       <tr key={r.id} className="hover:bg-slate-800/30">
-                        <td className="p-3 font-bold text-sky-400">{r.ticker}</td>
+                        <td className="p-3">
+                          <span className="font-bold text-sky-400">{r.ticker}</span>
+                          {r.asset_type === 'TEFAS_FON' && (
+                            <span
+                              title="Fonun alt fonu - fiyat TEFAS NAV'dan (fonaly.com), gunde bir yenilenir"
+                              className="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-950 text-violet-300 border border-violet-800"
+                            >
+                              {TÜR_LABEL.TEFAS_FON}
+                            </span>
+                          )}
+                        </td>
                         <td className="p-3 text-slate-300">{r.company_name ?? '—'}</td>
                         <td className="p-3 text-right text-slate-100 font-bold">
                           %{formatPublic(r.weight_pct, { digits: 2 })}

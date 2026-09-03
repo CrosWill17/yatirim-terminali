@@ -59,6 +59,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const MIN_IMPACT_PCT = 0.01;
 
 const TICKER_RE = /^[A-Z0-9]{2,10}$/;
+
+/** lib/types.ts FundAssetType ile hizalı. */
+const ASSET_TYPES = new Set(['HISSE', 'TEFAS_FON']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CODE_RE = /^[A-Z0-9]{2,10}$/;
 
@@ -155,14 +158,33 @@ for (const fund of data.funds) {
     if (name && name.length > 200) { errors.push(`${code}/${ticker}: company_name 200 karakterden uzun`); continue; }
     if (name && /'/.test(name)) name = name.replace(/'/g, '');
 
-    rows.push({ fund_code: code, ticker, company_name: name, weight_pct: w, as_of_date: fund.as_of_date });
+    // Varlık sınıfı: fiyat kaynağını belirler (HISSE -> Yahoo, TEFAS_FON -> fonaly).
+    // Verilmezse 'HISSE' — eski JSON dosyaları değişmeden çalışmaya devam eder.
+    const at = String(h.asset_type ?? 'HISSE').trim().toUpperCase();
+    if (!ASSET_TYPES.has(at)) {
+      errors.push(`${code}/${ticker}: asset_type '${h.asset_type}' gecersiz — ${[...ASSET_TYPES].join(' | ')}`); continue;
+    }
+    if (at === 'TEFAS_FON' && ticker.length > 9) {
+      errors.push(`${code}/${ticker}: TEFAS fon kodu 9 karakterden uzun olamaz`); continue;
+    }
+
+    rows.push({ fund_code: code, ticker, company_name: name, weight_pct: w, as_of_date: fund.as_of_date, asset_type: at });
   }
 
   // Uyarı (hata değil): KAP raporlarında hisse grubu toplamı %100 olmak zorunda
   // değil (fonun geri kalanı tahvil/mevduat olabilir). Ama %100'ü aşması
   // kesinlikle veri hatasıdır.
   if (total > 100.5) errors.push(`${code}: ağırlık toplamı %${total.toFixed(2)} > 100 — veri hatası`);
-  console.log(`  ${code}: ${seen.size} hisse, ağırlık toplamı %${total.toFixed(2)}, dönem ${fund.as_of_date}`);
+  // Alt fonlar eklendiğinden beri "N hisse" demek yanlış olurdu → tip kırılımı.
+  const fundRows = rows.filter((r) => r.fund_code === code);
+  const byType = fundRows.reduce((m, r) => {
+    const e = (m[r.asset_type] ??= { n: 0, w: 0 });
+    e.n++; e.w += r.weight_pct;
+    return m;
+  }, {});
+  const breakdown = Object.entries(byType)
+    .map(([t, e]) => `${t} ${e.n} adet %${e.w.toFixed(2)}`).join(' · ');
+  console.log(`  ${code}: ${fundRows.length} satır (${breakdown}), toplam %${total.toFixed(2)}, dönem ${fund.as_of_date}`);
 }
 
 if (errors.length > 0) {
@@ -196,7 +218,7 @@ const q = (s) => (s === null ? 'NULL' : `'${String(s).replace(/'/g, "''")}'`);
 function valuesBlock(indent) {
   const pad = ' '.repeat(indent);
   const tuples = rows.map((r) =>
-    `(${q(r.fund_code)},${q(r.ticker)},${q(r.company_name)},${r.weight_pct},${q(r.as_of_date)},${q(source)},${q(NOTES)})`);
+    `(${q(r.fund_code)},${q(r.ticker)},${q(r.company_name)},${r.weight_pct},${q(r.as_of_date)},${q(source)},${q(NOTES)},${q(r.asset_type)})`);
   const lines = [];
   for (let i = 0; i < tuples.length; i += rowsPerLine) {
     lines.push(pad + tuples.slice(i, i + rowsPerLine).join(','));
@@ -209,11 +231,12 @@ const UPDATE_SET = `  company_name = EXCLUDED.company_name,
   as_of_date   = EXCLUDED.as_of_date,
   source       = EXCLUDED.source,
   notes        = EXCLUDED.notes,
+  asset_type   = EXCLUDED.asset_type,
   updated_at   = now()`;
 
 /** ESKİ şema: user_id sütunu YOK. Düz INSERT, DO bloğu yok. */
 const insertOld = `INSERT INTO public.fund_holdings
-  (fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+  (fund_code, ticker, company_name, weight_pct, as_of_date, source, notes, asset_type)
 VALUES
 ${valuesBlock(2)}
 ON CONFLICT (fund_code, ticker) DO UPDATE SET
@@ -227,14 +250,14 @@ ${UPDATE_SET};`;
 const insertNew = `-- Birden fazla hesabiniz varsa alttaki SELECT'i kendi UUID'nizle degistirin:
 --   SELECT id, email FROM auth.users ORDER BY created_at;
 INSERT INTO public.fund_holdings
-  (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+  (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes, asset_type)
 SELECT (SELECT id FROM auth.users ORDER BY created_at LIMIT 1),
        v.fund_code, v.ticker, v.company_name,
-       v.weight_pct::numeric, v.as_of_date::date, v.source, v.notes
+       v.weight_pct::numeric, v.as_of_date::date, v.source, v.notes, v.asset_type
 FROM (
   VALUES
 ${valuesBlock(4)}
-  ) AS v(fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+  ) AS v(fund_code, ticker, company_name, weight_pct, as_of_date, source, notes, asset_type)
 ON CONFLICT (user_id, fund_code, ticker) DO UPDATE SET
 ${UPDATE_SET};`;
 
@@ -258,13 +281,13 @@ BEGIN
     END IF;
 
     INSERT INTO public.fund_holdings
-      (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+      (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes, asset_type)
     SELECT owner, v.fund_code, v.ticker, v.company_name,
-           v.weight_pct::numeric, v.as_of_date::date, v.source, v.notes
+           v.weight_pct::numeric, v.as_of_date::date, v.source, v.notes, v.asset_type
     FROM (
       VALUES
 ${valuesBlock(8)}
-    ) AS v(fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+    ) AS v(fund_code, ticker, company_name, weight_pct, as_of_date, source, notes, asset_type)
     ON CONFLICT (user_id, fund_code, ticker) DO UPDATE SET
       company_name = EXCLUDED.company_name,
       weight_pct   = EXCLUDED.weight_pct,
@@ -276,7 +299,7 @@ ${valuesBlock(8)}
     RAISE NOTICE '% satir yazildi (yeni sema, sahip %)', ${rows.length}, owner;
   ELSE
     INSERT INTO public.fund_holdings
-      (fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+      (fund_code, ticker, company_name, weight_pct, as_of_date, source, notes, asset_type)
     VALUES
 ${valuesBlock(6)}
     ON CONFLICT (fund_code, ticker) DO UPDATE SET

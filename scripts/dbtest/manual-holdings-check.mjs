@@ -129,6 +129,9 @@ const count = async (sql) => Number((await admin.query(sql)).rows[0].c);
 const SETUP = [
   'supabase/supabase_schema.sql',
   'supabase/supabase_fund_holdings_migration.sql',
+  // asset_type sütunu — üretilen SQL artık bu sütunu yazdığı için migration
+  // listede OLMALI, yoksa her variant "column asset_type does not exist" der.
+  'supabase/supabase_fund_asset_type_migration.sql',
   'supabase/supabase_twitter_migration.sql',
   'supabase/supabase_fund_proposals_migration.sql',
 ];
@@ -204,6 +207,32 @@ console.log('\n=== Çift kayıt kontrolü ===');
 t('toplam satır = doğru kullanıcıya bağlı satır',
   await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn})`)
   === await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn}) AND user_id = '${USER_A}'`));
+
+console.log('\n=== VARLIK TİPİ (asset_type) ===');
+// Beklenen dağılım doğrudan JSON'dan türetilir — elle yazılmış sabit sayı yok,
+// böylece veri dosyası değiştiğinde test sessizce yanlış kalmaz.
+const expectedByType = {};
+for (const c of ACTIVE) {
+  for (const f of JSON.parse(readFileSync(join(REPO, c.json), 'utf8')).funds) {
+    for (const h of f.holdings) {
+      const at = String(h.asset_type ?? 'HISSE').toUpperCase();
+      if (Number(h.weight_pct) < 0.01) continue; // generator bunları düşürüyor
+      const key = `${f.fund_code}|${at}`;
+      expectedByType[key] = (expectedByType[key] ?? 0) + 1;
+    }
+  }
+}
+const typeRows = await admin.query(
+  `SELECT fund_code, asset_type, count(*) c FROM fund_holdings
+    WHERE fund_code IN (${allIn}) GROUP BY 1, 2 ORDER BY 1, 2`);
+const gotByType = Object.fromEntries(typeRows.rows.map((r) => [`${r.fund_code}|${r.asset_type}`, Number(r.c)]));
+for (const [key, want] of Object.entries(expectedByType)) {
+  t(`${key} → ${want} satır`, gotByType[key] === want, `bulunan ${gotByType[key] ?? 0}`);
+}
+t('asset_type asla NULL değil',
+  await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn}) AND asset_type IS NULL`) === 0);
+t('bilinmeyen asset_type yok',
+  await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn}) AND asset_type NOT IN ('HISSE','TEFAS_FON')`) === 0);
 
 console.log('\n=== Yalıtım ===');
 await admin.query(`INSERT INTO auth.users (id, email) VALUES ('${USER_B}', 'b@example.com')`);

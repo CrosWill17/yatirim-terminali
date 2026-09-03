@@ -93,6 +93,12 @@ export interface MarketTicker {
  * source='manual' / 'kap-pdf' → ana kaynak (ham veri, onay gerektirmez, sync ezmez)
  * source='auto' / 'fintables' / 'rotaborsa' → ikincil kaynak, sync ezebilir
  */
+/**
+ * Varlık sınıfı. lib/assetMeta.ts'teki ASSET_TYPE_LABELS ile hizalı.
+ * Fiyat kaynağını belirler: HISSE → Yahoo (.IS), TEFAS_FON → fonaly.com.
+ */
+export type FundAssetType = 'HISSE' | 'TEFAS_FON';
+
 export interface FundHoldingRow {
   id: string;
   fund_code: string;
@@ -102,6 +108,12 @@ export interface FundHoldingRow {
   as_of_date: string;
   source: 'auto' | 'calibration' | 'manual' | 'kap-pdf' | 'fintables' | 'rotaborsa';
   notes: string | null;
+  /**
+   * supabase_fund_asset_type_migration.sql ile eklendi. Migration henüz
+   * koşmadıysa supabase sütunu döndürmez → undefined; o yüzden opsiyonel.
+   * Okuyan her yer `?? 'HISSE'` ile varsayılana düşmeli.
+   */
+  asset_type?: FundAssetType | string | null;
 }
 
 /* ------------------------------------------------------------------ */
