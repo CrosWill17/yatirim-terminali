@@ -2,16 +2,31 @@
  * MANUEL FON İÇERİĞİ → SQL ÜRETECİ
  *
  * Amaç: TLY / DFI / THF gibi fonların hisse içeriğini, otomatik sync
- * (fintables/rotaborsa) çalışmadığı için ELLE girmek. Bu script bir JSON
- * dosyasından Supabase SQL Editor'e yapıştırılabilir, İDMPOTENT bir SQL
- * dosyası üretir.
+ * (fintables/rotaborsa) çalışmadığı için ELLE girmek. JSON'dan Supabase SQL
+ * Editor'e yapıştırılabilir, İDMPOTENT bir SQL dosyası üretir.
  *
  * Kullanım:
- *   node scripts/manual-holdings.mjs <veri.json> [çıktı.sql]
+ *   node scripts/manual-holdings.mjs <veri.json> [çıktı.sql] [seçenekler]
+ *
+ * Seçenekler:
+ *   --schema=old|new|auto   (varsayılan: auto)
+ *       old  → DÜZ INSERT, user_id'siz şema (RLS migrasyonu ÖNCESİ)
+ *       new  → DÜZ INSERT, user_id'li şema (RLS migrasyonu SONRASI)
+ *       auto → DO bloğu runtime'da user_id sütununa bakar
+ *   --rows-per-line=N       (varsayılan: 3)  VALUES satırlarını gruplar
+ *   --notes=<metin>         notes sütununa yazılacak kısa etiket
+ *
+ * ÇIKTI SAF ASCII'DİR. Sebep: Supabase SQL Editor'e kopyalarken em-dash (—),
+ * emoji (⚠) ve U+FE0F gibi karakterler kaybolup "unterminated quoted string"
+ * hatasına yol açıyor. Uzun, her satırda tekrarlanan notes metni de dosyayı
+ * şişiriyor (106 satırda ~7 KB). Bu yüzden:
+ *   - tüm metin ASCII'ye çevrilir
+ *   - notes kısa tutulur
+ *   - VALUES satırları gruplanır
  *
  * JSON biçimi:
  * {
- *   "source": "manual",                 // manual | auto   (aşağıdaki nota bakın)
+ *   "source": "manual",                 // manual | auto | kap-pdf
  *   "funds": [
  *     {
  *       "fund_code": "TLY",
@@ -30,12 +45,6 @@
  *             (scripts/fund_holdings/sync.ts → hasRecentKapPdf).
  *   auto   → sync job'u başarılı bir çekim yaptığında bu satırları ezer;
  *             yeni listede olmayanları SİLER. Yani gerçekten "geçici" veri.
- *
- * ŞEMA UYUMU: Üretilen SQL hem eski şemada (UNIQUE (fund_code,ticker), user_id
- * YOK) hem de supabase_rls_user_isolation.sql sonrasındaki şemada
- * (UNIQUE (user_id,fund_code,ticker)) çalışır — user_id sütununun var olup
- * olmadığına runtime'da bakar. Böylece "önce mi sonra mı çalıştırmalıyım"
- * diye düşünmeniz gerekmez.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -53,30 +62,46 @@ const TICKER_RE = /^[A-Z0-9]{2,10}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CODE_RE = /^[A-Z0-9]{2,10}$/;
 
+/** Türkçe + tipografik karakterleri ASCII'ye indirger. */
+const ASCII_MAP = {
+  ç: 'c', Ç: 'C', ğ: 'g', Ğ: 'G', ı: 'i', İ: 'I', i̇: 'i',
+  ö: 'o', Ö: 'O', ş: 's', Ş: 'S', ü: 'u', Ü: 'U',
+  â: 'a', Â: 'A', î: 'i', Î: 'I', û: 'u', Û: 'U',
+  '—': '-', '–': '-', '…': '...', '·': '-', '’': "'", '‘': "'",
+  '“': '"', '”': '"', '⚠': '!', '\uFE0F': '', '\u200B': '',
+};
+function toAscii(s) {
+  return String(s)
+    .replace(/[^\x00-\x7F]/g, (c) => (c in ASCII_MAP ? ASCII_MAP[c] : ''))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function fail(msg) {
   console.error(`HATA: ${msg}`);
   process.exit(1);
 }
 
-/**
- * --schema=old|new|auto   (varsayılan: auto)
- *
- *   auto → DO bloğu runtime'da user_id sütununa bakar (hem eski hem yeni şema)
- *   old  → DÜZ INSERT, DO bloğu YOK. Yalnızca RLS migrasyonu ÖNCESİ şema.
- *   new  → DÜZ INSERT, user_id'li. Yalnızca RLS migrasyonu SONRASI şema.
- *
- * `old`/`new` modlarında dosyada HİÇ `DO`/`$$` bulunmaz. Bazı SQL istemcileri
- * dolar-alıntılı ($$) blokları yanlış böldüğü için bu modlar daha güvenlidir.
- */
-const schemaArg = (process.argv.find((a) => a.startsWith('--schema=')) ?? '--schema=auto')
-  .slice('--schema='.length);
+/* ------------------------------------------------------------------ */
+/* Argümanlar                                                          */
+/* ------------------------------------------------------------------ */
+const opt = (name, dflt) => {
+  const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return hit ? hit.slice(name.length + 3) : dflt;
+};
+
+const schemaArg = opt('schema', 'auto');
 if (!['old', 'new', 'auto'].includes(schemaArg)) {
   fail(`--schema '${schemaArg}' geçersiz — old | new | auto olmalı`);
 }
 
+const rowsPerLine = Math.max(1, Number(opt('rows-per-line', '3')) || 3);
+
 const args = process.argv.filter((a) => !a.startsWith('--'));
 const [, , inputPath, outputPath] = args;
-if (!inputPath) fail('kullanım: node scripts/manual-holdings.mjs <veri.json> [çıktı.sql] [--schema=old|new|auto]');
+if (!inputPath) {
+  fail('kullanım: node scripts/manual-holdings.mjs <veri.json> [çıktı.sql] [--schema=old|new|auto]');
+}
 
 let data;
 try {
@@ -89,10 +114,7 @@ const source = data.source ?? 'manual';
 if (!['manual', 'auto', 'kap-pdf'].includes(source)) {
   fail(`source '${source}' geçersiz — manual | auto | kap-pdf olmalı`);
 }
-
-if (!Array.isArray(data.funds) || data.funds.length === 0) {
-  fail('funds dizisi boş veya yok');
-}
+if (!Array.isArray(data.funds) || data.funds.length === 0) fail('funds dizisi boş veya yok');
 
 /* ------------------------------------------------------------------ */
 /* Doğrulama — hatalı veri DB'ye gitmesin                              */
@@ -100,54 +122,38 @@ if (!Array.isArray(data.funds) || data.funds.length === 0) {
 const rows = [];
 const errors = [];
 const dropped = [];   // MIN_IMPACT_PCT altı — sessizce atılmaz, raporlanır
+const dates = new Set();
 
 for (const fund of data.funds) {
   const code = String(fund.fund_code ?? '').trim().toUpperCase();
-  if (!CODE_RE.test(code)) {
-    errors.push(`fund_code geçersiz: '${fund.fund_code}'`);
-    continue;
-  }
+  if (!CODE_RE.test(code)) { errors.push(`fund_code geçersiz: '${fund.fund_code}'`); continue; }
   if (!DATE_RE.test(String(fund.as_of_date ?? ''))) {
-    errors.push(`${code}: as_of_date 'YYYY-AA-GG' biçiminde olmalı, gelen: '${fund.as_of_date}'`);
-    continue;
+    errors.push(`${code}: as_of_date 'YYYY-AA-GG' olmalı, gelen: '${fund.as_of_date}'`); continue;
   }
   if (!Array.isArray(fund.holdings) || fund.holdings.length === 0) {
-    errors.push(`${code}: holdings boş`);
-    continue;
+    errors.push(`${code}: holdings boş`); continue;
   }
+  dates.add(fund.as_of_date);
 
   let total = 0;
   const seen = new Set();
   for (const h of fund.holdings) {
     const ticker = String(h.ticker ?? '').trim().toUpperCase();
-    if (!TICKER_RE.test(ticker)) {
-      errors.push(`${code}: ticker geçersiz '${h.ticker}'`);
-      continue;
-    }
-    if (seen.has(ticker)) {
-      errors.push(`${code}: ticker '${ticker}' tekrar ediyor`);
-      continue;
-    }
+    if (!TICKER_RE.test(ticker)) { errors.push(`${code}: ticker geçersiz '${h.ticker}'`); continue; }
+    if (seen.has(ticker)) { errors.push(`${code}: ticker '${ticker}' tekrar ediyor`); continue; }
     seen.add(ticker);
 
     const w = Number(h.weight_pct);
     if (!Number.isFinite(w) || w < 0 || w > 100) {
-      errors.push(`${code}/${ticker}: weight_pct 0–100 arasında olmalı, gelen: '${h.weight_pct}'`);
-      continue;
+      errors.push(`${code}/${ticker}: weight_pct 0–100 arası olmalı, gelen: '${h.weight_pct}'`); continue;
     }
-    if (w < MIN_IMPACT_PCT) {
-      dropped.push(`${code}/${ticker} (%${w})`);
-      continue;
-    }
+    if (w < MIN_IMPACT_PCT) { dropped.push(`${code}/${ticker} (%${w})`); continue; }
     total += w;
 
-    const name = h.company_name == null || String(h.company_name).trim() === ''
-      ? null
-      : String(h.company_name).trim();
-    if (name && name.length > 200) {
-      errors.push(`${code}/${ticker}: company_name 200 karakterden uzun`);
-      continue;
-    }
+    let name = h.company_name == null || String(h.company_name).trim() === ''
+      ? null : toAscii(h.company_name);
+    if (name && name.length > 200) { errors.push(`${code}/${ticker}: company_name 200 karakterden uzun`); continue; }
+    if (name && /'/.test(name)) name = name.replace(/'/g, '');
 
     rows.push({ fund_code: code, ticker, company_name: name, weight_pct: w, as_of_date: fund.as_of_date });
   }
@@ -166,35 +172,37 @@ if (errors.length > 0) {
 }
 if (rows.length === 0) fail('geçerli satır yok');
 if (dropped.length > 0) {
-  console.log(`  ⚠️  %${MIN_IMPACT_PCT} altı olduğu için dışlanan ${dropped.length} satır (lib/fundHoldings.ts kuralı):`);
-  dropped.forEach((d) => console.log(`       - ${d}`));
+  console.log(`  ! %${MIN_IMPACT_PCT} altı olduğu için dışlanan ${dropped.length} satır (lib/fundHoldings.ts kuralı):`);
+  dropped.forEach((d) => console.log(`      - ${d}`));
 }
 
 /* ------------------------------------------------------------------ */
 /* SQL üret                                                            */
 /* ------------------------------------------------------------------ */
-const q = (s) => (s === null ? 'NULL' : `'${String(s).replace(/'/g, "''")}'`);
+const IN_LIST = Array.from(new Set(rows.map((r) => r.fund_code))).map((c) => `'${c}'`).join(', ');
+const EXPECTED = Array.from(new Set(rows.map((r) => r.fund_code)))
+  .map((c) => `${c} = ${rows.filter((r) => r.fund_code === c).length} hisse`).join(', ');
 
 /**
- * VALUES satırları — `indent` kadar girintili, virgüllü liste.
- * 7 sütun: fund_code, ticker, company_name, weight_pct, as_of_date, source, notes
- * (source ve notes her satırda aynı; INSERT'in hedef sütun sayısıyla birebir
- *  eşleşmesi şart, yoksa "INSERT has more target columns than expressions".)
+ * notes KISA ve ASCII tutulur. Sebep: bu metin her satırda tekrarlanıyor;
+ * 106 satırda 70 karakterlik bir metin ~7 KB saf fazlalık demek ve kopyalama
+ * sırasında en çok bu uzun string'ler kopuyor.
  */
-const NOTES = `manuel giriş (geçici) — scripts/manual-holdings.mjs${
-  dropped.length > 0 ? ` | dışlanan: ${dropped.length}` : ''
-}`;
+const NOTES = toAscii(opt('notes', `manuel ${Array.from(dates).join(' ')}`));
+
+const q = (s) => (s === null ? 'NULL' : `'${String(s).replace(/'/g, "''")}'`);
+
+/** VALUES satırları — `rowsPerLine` kadarı aynı satırda, ASCII. */
 function valuesBlock(indent) {
   const pad = ' '.repeat(indent);
-  return rows
-    .map((r) => `${pad}(${q(r.fund_code)}, ${q(r.ticker)}, ${q(r.company_name)}, ${r.weight_pct}, ${q(r.as_of_date)}, ${q(source)}, ${q(NOTES)})`)
-    .join(',\n');
+  const tuples = rows.map((r) =>
+    `(${q(r.fund_code)},${q(r.ticker)},${q(r.company_name)},${r.weight_pct},${q(r.as_of_date)},${q(source)},${q(NOTES)})`);
+  const lines = [];
+  for (let i = 0; i < tuples.length; i += rowsPerLine) {
+    lines.push(pad + tuples.slice(i, i + rowsPerLine).join(','));
+  }
+  return lines.join(',\n');
 }
-
-const fundCodes = Array.from(new Set(rows.map((r) => r.fund_code)));
-
-const IN_LIST = fundCodes.map((c) => `'${c}'`).join(', ');
-const EXPECTED = fundCodes.map((c) => `${c} = ${rows.filter((r) => r.fund_code === c).length} hisse`).join(', ');
 
 const UPDATE_SET = `  company_name = EXCLUDED.company_name,
   weight_pct   = EXCLUDED.weight_pct,
@@ -216,7 +224,7 @@ ${UPDATE_SET};`;
  * auth.uid() NULL'dır; sahibi auth.users'tan ilk kullanıcıyla çözüyoruz.
  * Birden fazla hesabınız varsa SELECT satırını kendi UUID'nizle değiştirin.
  */
-const insertNew = `-- ⚠️ Birden fazla hesabınız varsa alttaki SELECT'i kendi UUID'nizle değiştirin:
+const insertNew = `-- Birden fazla hesabiniz varsa alttaki SELECT'i kendi UUID'nizle degistirin:
 --   SELECT id, email FROM auth.users ORDER BY created_at;
 INSERT INTO public.fund_holdings
   (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
@@ -246,7 +254,7 @@ BEGIN
   IF has_user_id THEN
     SELECT id INTO owner FROM auth.users ORDER BY created_at LIMIT 1;
     IF owner IS NULL THEN
-      RAISE EXCEPTION 'auth.users boş — satırların sahibi belirlenemiyor.';
+      RAISE EXCEPTION 'auth.users bos - satirlarin sahibi belirlenemiyor.';
     END IF;
 
     INSERT INTO public.fund_holdings
@@ -265,7 +273,7 @@ ${valuesBlock(8)}
       notes        = EXCLUDED.notes,
       updated_at   = now();
 
-    RAISE NOTICE '% satır yazıldı (yeni şema, sahip %)', ${rows.length}, owner;
+    RAISE NOTICE '% satir yazildi (yeni sema, sahip %)', ${rows.length}, owner;
   ELSE
     INSERT INTO public.fund_holdings
       (fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
@@ -279,7 +287,7 @@ ${valuesBlock(6)}
       notes        = EXCLUDED.notes,
       updated_at   = now();
 
-    RAISE NOTICE '% satır yazıldı (eski şema)', ${rows.length};
+    RAISE NOTICE '% satir yazildi (eski sema)', ${rows.length};
   END IF;
 END
 $body$;`;
@@ -287,33 +295,33 @@ $body$;`;
 const body = schemaArg === 'old' ? insertOld : schemaArg === 'new' ? insertNew : insertAuto;
 
 const SCHEMA_NOTE = {
-  old: '-- ŞEMA: ESKİ (user_id YOK) — supabase_rls_user_isolation.sql ÖNCESİ.\n-- DO/$$ bloğu İÇERMEZ; her SQL istemcisinde sorunsuz koşar.',
-  new: '-- ŞEMA: YENİ (user_id VAR) — supabase_rls_user_isolation.sql SONRASI.\n-- DO/$$ bloğu İÇERMEZ; her SQL istemcisinde sorunsuz koşar.',
-  auto: "-- ŞEMA: OTOMATİK — DO bloğu runtime'da user_id sütununa bakar.\n-- (Bazı SQL istemcileri $$ bloklarını yanlış böler; sorun çıkarsa\n--  --schema=old veya --schema=new ile yeniden üretin.)",
+  old: '-- SEMA: ESKI (user_id YOK) - supabase_rls_user_isolation.sql ONCESI.\n-- DO/$$ blogu ICERMEZ; her SQL istemcisinde sorunsuz kosar.',
+  new: '-- SEMA: YENI (user_id VAR) - supabase_rls_user_isolation.sql SONRASI.\n-- DO/$$ blogu ICERMEZ; her SQL istemcisinde sorunsuz kosar.',
+  auto: "-- SEMA: OTOMATIK - DO blogu runtime'da user_id sutununa bakar.\n-- (Bazi SQL istemcileri $$ bloklarini yanlis boler; sorun cikarsa\n--  --schema=old veya --schema=new ile yeniden uretin.)",
 }[schemaArg];
 
-const sql = `-- =============================================================================
--- MANUEL FON İÇERİĞİ — ${fundCodes.join(', ')}
--- Üreten: scripts/manual-holdings.mjs --schema=${schemaArg}  (elle düzenlemeyin)
--- source = '${source}' · ${rows.length} satır
+const SOURCE_NOTE = source === 'manual'
+  ? "--   Sync job'u bu satirlari ASLA ezmez. Ayrica as_of_date son 45 gun\n--   icindeyse bu fonlarin otomatik sync'i TAMAMEN atlanir."
+  : "--   Sync job'u basarili bir cekim yaptiginda bu satirlari EZER, yeni\n--   listede olmayanlari SILER. Yani bunlar gercekten gecici placeholder.";
+
+const raw = `-- =============================================================================
+-- MANUEL FON ICERIGI - ${Array.from(new Set(rows.map((r) => r.fund_code))).join(', ')}
+-- Ureten: scripts/manual-holdings.mjs --schema=${schemaArg}
+-- source = '${source}' | ${rows.length} satir | notes = '${NOTES}'
 --
--- İDEMPOTENT: tekrar çalıştırmak güvenlidir (ON CONFLICT DO UPDATE).
+-- IDEMPOTENT: tekrar calistirmak guvenlidir (ON CONFLICT DO UPDATE).
+-- CIKTI SAF ASCII - kopyalarken Turkce karakter/emoji kaybi yasamazsiniz.
 --
 ${SCHEMA_NOTE}
 --
--- ⚠️ source='${source}' NE DEMEK:
-${source === 'manual'
-    ? `--   Sync job'u bu satırları ASLA ezmez. Ayrıca as_of_date son 45 gün içindeyse
---   bu fonların otomatik sync'i TAMAMEN atlanır. Gerçek veri geldiğinde
---   aşağıdaki "TEMİZLİK" bloğunu çalıştırın.`
-    : `--   Sync job'u başarılı bir çekim yaptığında bu satırları EZER, yeni listede
---   olmayanları SİLER. Yani bunlar gerçekten geçici placeholder.`}
+-- source='${source}' NE DEMEK:
+${SOURCE_NOTE}
 -- =============================================================================
 
 ${body}
 
 -- -----------------------------------------------------------------------------
--- DOĞRULAMA — çalıştırdıktan sonra bu sorguyu koşun
+-- DOGRULAMA - calistirdiktan sonra bu sorguyu kosun
 -- Beklenen: ${EXPECTED}
 -- -----------------------------------------------------------------------------
 SELECT fund_code, count(*) AS hisse_sayisi,
@@ -325,16 +333,20 @@ SELECT fund_code, count(*) AS hisse_sayisi,
  ORDER BY fund_code;
 
 -- -----------------------------------------------------------------------------
--- TEMİZLİK (yalnızca gerektiğinde, yorumu kaldırıp çalıştırın)
+-- TEMIZLIK (yalnizca gerektiginde, yorumu kaldirip calistirin)
 -- -----------------------------------------------------------------------------
 -- DELETE FROM fund_holdings
 --  WHERE fund_code IN (${IN_LIST})
---    AND source = '${source}'
---    AND notes LIKE 'manuel giriş (geçici)%';
+--    AND notes = '${NOTES}';
 `;
 
-// VALUES bloğunu iki şema için ayrı ayrı doğru biçimde yerleştir
+// Son emniyet: çıktıdaki HER şey ASCII olmalı
+const nonAscii = Array.from(new Set(raw.match(/[^\x00-\x7F]/g) ?? []));
+if (nonAscii.length > 0) {
+  fail(`çıktıda ASCII dışı karakter kaldı: ${nonAscii.map((c) => `U+${c.codePointAt(0).toString(16).toUpperCase()}`).join(', ')}`);
+}
+
 const out = outputPath ?? inputPath.replace(/\.json$/, '.sql');
-writeFileSync(out, sql, 'utf8');
-console.log(`\n✓ ${rows.length} satır, ${fundCodes.length} fon → ${out}`);
-console.log(`  source = '${source}'`);
+writeFileSync(out, raw, 'utf8');
+console.log(`\n✓ ${rows.length} satır, ${new Set(rows.map((r) => r.fund_code)).size} fon → ${out}`);
+console.log(`  source='${source}' · şema=${schemaArg} · ${raw.length} bayt · ${raw.split('\n').length} satır · saf ASCII`);

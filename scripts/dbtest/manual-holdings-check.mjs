@@ -70,6 +70,16 @@ for (const c of ACTIVE) {
     try {
       execFileSync(process.execPath, [join(REPO, 'scripts/manual-holdings.mjs'), c.json, out, `--schema=${mode}`],
         { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
+
+      // SAF ASCII DENETİMİ — kullanıcı bu yüzden iki kez hata aldı:
+      // Supabase SQL Editor'e kopyalarken em-dash (U+2014), emoji (U+26A0) ve
+      // görünmez U+FE0F kaybolup "unterminated quoted string" üretiyor.
+      // Her satırda tekrarlanan uzun notes metni de dosyayı şişiriyordu.
+      const text = readFileSync(out, 'utf8');
+      const bad = Array.from(new Set(text.match(/[^\x00-\x7F]/g) ?? []));
+      t(`--schema=${mode} çıktısı saf ASCII`, bad.length === 0,
+        bad.map((x) => `U+${x.codePointAt(0).toString(16).toUpperCase()}`).join(','));
+
       variants.push({ label: c.label, mode, sqlPath: out, spec });
     } catch (e) {
       t(`üreteç --schema=${mode} (${c.json})`, false, e.stderr?.toString() ?? e.message);
