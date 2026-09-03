@@ -1,89 +1,88 @@
 /**
  * MANUEL FON İÇERİĞİ SQL DOĞRULAMASI
  *
- * scripts/manual-holdings.mjs'in ürettiği SQL dosyasını GERÇEK bir PostgreSQL
- * üzerinde, HEM eski şemada HEM supabase_rls_user_isolation.sql sonrasındaki
- * şemada çalıştırıp sonucu denetler.
- *
  *   npm run test:manual-sql
  *
- * Denetlenenler:
- *   1. SQL eski şemada çalışıyor
- *   2. Satır sayıları JSON ile birebir aynı
- *   3. En ağır satırlar ve ağırlıkları beklenen değerlerde
- *   4. Ağırlık toplamı ≤ 100 (lib/fundHoldings.ts validateParsed kuralı)
- *   5. MIN_IMPACT_PCT altı satırlar yazılmamış
- *   6. İdempotent — 2. koşuda satır artmıyor
- *   7. RLS migrasyonu sonrası tüm satırlar user_id alıyor
- *   8. Aynı SQL yeni şemada upsert olarak çalışıyor, çift kayıt yok
- *   9. Yalıtım: başka kullanıcı satırları göremiyor
+ * scripts/manual-holdings.mjs'i HER ÜÇ modda (--schema=old|new|auto) çalıştırıp
+ * ürettiği SQL'i GERÇEK bir PostgreSQL üzerinde koşar. SQL metnine bakmaz —
+ * gerçekten çalıştırır. Böylece "VALUES bloğunda sütun eksik", "as_of_date için
+ * ::date cast'i yok", "DO bloğu yanlış bölündü" gibi yalnızca koşunca ortaya
+ * çıkan hataları yakalar.
  *
- * Bu test SQL metnine bakmaz; gerçekten çalıştırır. Böylece "VALUES bloğunda
- * sütun eksik" veya "as_of_date için ::date cast'i yok" gibi yalnızca koşunca
- * ortaya çıkan hataları yakalar.
+ * Denetlenen matris:
+ *                      eski şema      yeni şema (RLS migrasyonu sonrası)
+ *   --schema=old       ✓ çalışmalı    ✗ reddedilmeli
+ *   --schema=new       ✗ reddedilmeli ✓ çalışmalı
+ *   --schema=auto      ✓ çalışmalı    ✓ çalışmalı
+ *
+ * Ek olarak: satır sayıları, ağırlık toplamı ≤ 100, MIN_IMPACT_PCT filtresi,
+ * tekrar eden ticker yokluğu, idempotency, user_id backfill, kullanıcı yalıtımı.
+ *
+ * VERİ DOSYALARI (data/*.json) kullanıcıya özeldir ve .gitignore'dadır — repoda
+ * bulunmazlar. Yoksa test atlar ve 0 ile çıkar, CI kırmızı olmaz.
  */
 
 import EmbeddedPostgres from 'embedded-postgres';
 import { Client } from 'pg';
-import { readFileSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const TMP = join(REPO, 'node_modules', '.pgtest-manual');
 
-/**
- * data/ altındaki her manual-holdings girdisi + ona karşılık gelen SQL.
- * Yeni bir manuel veri dosyası eklerken buraya da ekleyin.
- */
+/** Yeni bir manuel veri dosyası eklerken buraya da ekleyin. */
 const CASES = [
-  {
-    label: 'Tera Portföy THF+TLY — Ağustos 2026 KAP raporu',
-    json: 'data/tera_holdings_2026-08.json',
-    sql: 'supabase/manual_holdings_tera_2026-08.sql',
-  },
+  { label: 'Tera Portföy THF+TLY — Ağustos 2026 KAP raporu', json: 'data/tera_holdings_2026-08.json' },
 ];
 
 const USER_A = '11111111-1111-1111-1111-111111111111';
 const USER_B = '22222222-2222-2222-2222-222222222222';
 const PORT = Number(process.env.PGTEST_PORT ?? 55441);
-const DATA_DIR = process.env.PGTEST_DIR ?? join(REPO, 'node_modules', '.pgtest-manual');
 
 let pass = 0;
 let fail = 0;
 const t = (name, ok, detail = '') => {
-  if (ok) {
-    pass++;
-    console.log(`  PASS  ${name}`);
-  } else {
-    fail++;
-    console.log(`  FAIL  ${name}  ::  ${String(detail).replace(/\s+/g, ' ').slice(-180)}`);
-  }
+  if (ok) { pass++; console.log(`  PASS  ${name}`); }
+  else { fail++; console.log(`  FAIL  ${name}  ::  ${String(detail).replace(/\s+/g, ' ').slice(-180)}`); }
 };
 
-/**
- * CASES'teki dosyalar KULLANICIYA ÖZEL veridir ve .gitignore'dadır — repoda
- * bulunmazlar. Bu yüzden yokluk hata değil, normal durumdur: test o case'i
- * atlar. Hiç case kalmazsa 0 exit ile çıkar ki CI'da kırmızı görünmesin.
- *
- * Kendi verinizle koşmak için:
- *   node scripts/manual-holdings.mjs <veri.json> <çıktı.sql>
- * ve CASES listesine ikisini de ekleyin.
- */
-const ACTIVE = CASES.filter((c) => existsSync(join(REPO, c.json)) && existsSync(join(REPO, c.sql)));
-const SKIPPED = CASES.filter((c) => !ACTIVE.includes(c));
-
+const ACTIVE = CASES.filter((c) => existsSync(join(REPO, c.json)));
 if (ACTIVE.length === 0) {
   console.log('MANUEL SQL DOĞRULAMA: koşacak case yok (veri dosyaları yerel, .gitignore\'da).');
-  if (SKIPPED.length > 0) {
-    console.log(`  atlanan: ${SKIPPED.map((c) => c.json).join(', ')}`);
-    console.log('  Üretmek için: node scripts/manual-holdings.mjs <veri.json> <çıktı.sql>');
-  }
+  console.log(`  beklenen: ${CASES.map((c) => c.json).join(', ')}`);
+  console.log('  Üretmek için: node scripts/manual-holdings.mjs <veri.json> <çıktı.sql>');
   process.exit(0);
 }
 
-rmSync(DATA_DIR, { recursive: true, force: true });
+/* ------------------------------------------------------------------ */
+/* Üreteci üç modda da koş                                             */
+/* ------------------------------------------------------------------ */
+rmSync(TMP, { recursive: true, force: true });
+mkdirSync(TMP, { recursive: true });
+
+const variants = []; // { label, mode, sqlPath, spec }
+for (const c of ACTIVE) {
+  const spec = JSON.parse(readFileSync(join(REPO, c.json), 'utf8'));
+  for (const mode of ['old', 'new', 'auto']) {
+    const out = join(TMP, `${c.json.split('/').pop().replace(/\.json$/, '')}.${mode}.sql`);
+    try {
+      execFileSync(process.execPath, [join(REPO, 'scripts/manual-holdings.mjs'), c.json, out, `--schema=${mode}`],
+        { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
+      variants.push({ label: c.label, mode, sqlPath: out, spec });
+    } catch (e) {
+      t(`üreteç --schema=${mode} (${c.json})`, false, e.stderr?.toString() ?? e.message);
+    }
+  }
+}
+console.log(`Üretilen varyant: ${variants.length} (${ACTIVE.length} veri × 3 mod)\n`);
+
+/* ------------------------------------------------------------------ */
+/* PostgreSQL                                                          */
+/* ------------------------------------------------------------------ */
 const pg = new EmbeddedPostgres({
-  databaseDir: DATA_DIR, user: 'postgres', password: 'postgres', port: PORT, persistent: false,
+  databaseDir: join(TMP, 'pgdata'), user: 'postgres', password: 'postgres', port: PORT, persistent: false,
 });
 await pg.initialise();
 await pg.start();
@@ -112,8 +111,9 @@ await admin.query(`
   GRANT authenticated TO postgres;
 `);
 
-const run = async (rel) => admin.query(readFileSync(join(REPO, rel), 'utf8'));
-const count = async (sql, ...p) => Number((await admin.query(sql, p)).rows[0].c);
+const runFile = async (absPath) => admin.query(readFileSync(absPath, 'utf8'));
+const runRepo = async (rel) => admin.query(readFileSync(join(REPO, rel), 'utf8'));
+const count = async (sql) => Number((await admin.query(sql)).rows[0].c);
 
 const SETUP = [
   'supabase/supabase_schema.sql',
@@ -122,30 +122,31 @@ const SETUP = [
   'supabase/supabase_fund_proposals_migration.sql',
 ];
 
-console.log('Kurulum: eski şema (RLS migrasyonu YOK)');
-for (const f of SETUP) await run(f);
+console.log('=== ESKİ ŞEMA kuruluyor (RLS migrasyonu YOK) ===');
+for (const f of SETUP) await runRepo(f);
 await admin.query(`INSERT INTO auth.users (id, email) VALUES ('${USER_A}', 'a@example.com')`);
 
-for (const c of ACTIVE) {
-  const spec = JSON.parse(readFileSync(join(REPO, c.json), 'utf8'));
-  const codes = spec.funds.map((f) => f.fund_code);
+/** Bir varyantı koşup içerik denetimlerini yapar. shouldWork=false ise hata bekler. */
+async function exercise(v, schemaLabel, shouldWork) {
+  const codes = v.spec.funds.map((f) => f.fund_code);
   const inList = codes.map((x) => `'${x}'`).join(', ');
-  const expected = Object.fromEntries(spec.funds.map((f) => [f.fund_code, f.holdings.length]));
-  // MIN_IMPACT_PCT altı satırlar üreteç tarafından dışlanır → beklenen sayıyı
-  // JSON'dan değil, üretilen SQL'in kendi NOTES değerinden türetmek yerine
-  // doğrudan DB'den okuyup tutarlılığı denetliyoruz.
+  const tag = `--schema=${v.mode} @ ${schemaLabel}`;
 
-  console.log(`\n=== ${c.label} ===`);
-  console.log(`    dosya: ${c.sql}`);
+  let ran = false;
+  let err = null;
+  try { await runFile(v.sqlPath); ran = true; } catch (e) { err = e; }
 
-  try {
-    await run(c.sql);
-    t('SQL eski şemada çalıştı', true);
-  } catch (e) {
-    t('SQL eski şemada çalıştı', false, e.message);
-    continue;
+  if (!shouldWork) {
+    t(`${tag} → REDDEDİLDİ`, !ran, ran ? 'çalıştı ama çalışmamalıydı' : '');
+    if (!ran) console.log(`        (${err.code ?? ''} ${String(err.message).split('\n')[0].slice(0, 90)})`);
+    return;
   }
 
+  t(`${tag} → çalıştı`, ran, err?.message);
+  if (!ran) return;
+
+  // user_id seçilmez: eski şemada o sütun yok, sorgu 42703 verirdi.
+  // user_id denetimi ayrıca, migrasyon sonrasında yapılıyor.
   const rows = (await admin.query(
     `SELECT fund_code, ticker, weight_pct FROM fund_holdings
       WHERE fund_code IN (${inList}) ORDER BY fund_code, weight_pct DESC`
@@ -153,54 +154,43 @@ for (const c of ACTIVE) {
 
   for (const code of codes) {
     const mine = rows.filter((r) => r.fund_code === code);
+    const jsonCount = v.spec.funds.find((f) => f.fund_code === code).holdings.length;
     const total = mine.reduce((s, r) => s + Number(r.weight_pct), 0);
-    const jsonCount = expected[code];
-    console.log(`    ${code}: ${mine.length}/${jsonCount} satır, toplam ağırlık %${total.toFixed(2)}`);
 
-    // Dışlanan satırlar olabileceği için <= beklenen, ama 0 olmamalı
-    t(`${code} satır yazıldı`, mine.length > 0 && mine.length <= jsonCount, `${mine.length} / ${jsonCount}`);
-    t(`${code} ağırlık toplamı ≤ 100`, total <= 100.0001, `%${total.toFixed(4)}`);
-    t(`${code} ağırlık toplamı ≥ 1`, total >= 1, `%${total.toFixed(4)}`);
-
-    const below = mine.filter((r) => Number(r.weight_pct) < 0.01);
-    t(`${code} MIN_IMPACT_PCT altı satır yok`, below.length === 0, below.map((r) => r.ticker).join(','));
-
-    const dupes = mine.length - new Set(mine.map((r) => r.ticker)).size;
-    t(`${code} tekrar eden ticker yok`, dupes === 0, `${dupes} duplike`);
+    t(`${tag} ${code} satır yazıldı (≤ ${jsonCount})`, mine.length > 0 && mine.length <= jsonCount, `${mine.length}/${jsonCount}`);
+    t(`${tag} ${code} toplam ağırlık 1–100`, total >= 1 && total <= 100.0001, `%${total.toFixed(4)}`);
+    t(`${tag} ${code} MIN_IMPACT_PCT altı yok`, mine.every((r) => Number(r.weight_pct) >= 0.01),
+      mine.filter((r) => Number(r.weight_pct) < 0.01).map((r) => r.ticker).join(','));
+    t(`${tag} ${code} duplike ticker yok`, mine.length === new Set(mine.map((r) => r.ticker)).size);
   }
-
-  console.log('  -- idempotency --');
-  try {
-    await run(c.sql);
-    t('2. koşu başarılı', true);
-  } catch (e) {
-    t('2. koşu başarılı', false, e.message);
-  }
-  const after = await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${inList})`);
-  t('2. koşuda satır sayısı artmadı', after === rows.length, `${after} != ${rows.length}`);
+  return rows.length;
 }
 
-console.log('\n=== RLS migrasyonu uygulanıyor ===');
-await run('supabase/supabase_rls_user_isolation.sql');
+console.log('\n=== MATRİS: eski şema ===');
+for (const v of variants) await exercise(v, 'eski', v.mode !== 'new');
+
+console.log('\n=== İdempotency (eski şema, old modu) ===');
+for (const v of variants.filter((x) => x.mode === 'old')) {
+  const before = await count(`SELECT count(*) c FROM fund_holdings`);
+  try { await runFile(v.sqlPath); t('--schema=old 2. koşu başarılı', true); }
+  catch (e) { t('--schema=old 2. koşu başarılı', false, e.message); }
+  const after = await count(`SELECT count(*) c FROM fund_holdings`);
+  t('--schema=old 2. koşuda satır artmadı', before === after, `${before} → ${after}`);
+}
+
+console.log('\n=== RLS MİGRASYONU uygulanıyor (yeni şema) ===');
+await runRepo('supabase/supabase_rls_user_isolation.sql');
 
 const allCodes = ACTIVE.flatMap((c) => JSON.parse(readFileSync(join(REPO, c.json), 'utf8')).funds.map((f) => f.fund_code));
 const allIn = allCodes.map((x) => `'${x}'`).join(', ');
-
-t('tüm manuel satırlar user_id aldı',
+t('eski modla yazılan satırlar user_id aldı',
   await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn}) AND user_id IS NULL`) === 0);
-t('hepsi doğru kullanıcıya bağlı',
-  await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn}) AND user_id = '${USER_A}'`) > 0);
 
-console.log('\n=== Aynı SQL yeni şemada (upsert) ===');
-for (const c of ACTIVE) {
-  try {
-    await run(c.sql);
-    t(`${c.sql.split('/').pop()} yeni şemada çalıştı`, true);
-  } catch (e) {
-    t(`${c.sql.split('/').pop()} yeni şemada çalıştı`, false, e.message);
-  }
-}
-t('çift kayıt oluşmadı',
+console.log('\n=== MATRİS: yeni şema ===');
+for (const v of variants) await exercise(v, 'yeni', v.mode !== 'old');
+
+console.log('\n=== Çift kayıt kontrolü ===');
+t('toplam satır = doğru kullanıcıya bağlı satır',
   await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn})`)
   === await count(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn}) AND user_id = '${USER_A}'`));
 
@@ -211,7 +201,7 @@ await other.connect();
 await other.query('SET ROLE authenticated');
 await other.query("SELECT set_config('request.jwt.claim.sub', $1, false)", [USER_B]);
 const bRows = await other.query(`SELECT * FROM fund_holdings WHERE fund_code IN (${allIn})`);
-t("B kullanıcısı A'nın manuel içeriğini göremiyor", bRows.rowCount === 0, `${bRows.rowCount} satır`);
+t("B, A'nın manuel içeriğini göremiyor", bRows.rowCount === 0, `${bRows.rowCount} satır`);
 await other.query("SELECT set_config('request.jwt.claim.sub', $1, false)", [USER_A]);
 const aRows = await other.query(`SELECT count(*) c FROM fund_holdings WHERE fund_code IN (${allIn})`);
 t('A kendi içeriğini görüyor', Number(aRows.rows[0].c) > 0, aRows.rows[0].c);
@@ -223,5 +213,5 @@ console.log('='.repeat(64));
 
 await admin.end();
 await pg.stop();
-rmSync(DATA_DIR, { recursive: true, force: true });
+rmSync(TMP, { recursive: true, force: true });
 process.exit(fail > 0 ? 1 : 0);

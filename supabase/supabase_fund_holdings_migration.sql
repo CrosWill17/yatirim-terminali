@@ -9,32 +9,19 @@
 
 
 -- ==============================================================================
--- ⛔ YENİDEN ÇALIŞTIRMA KİLİDİ
+-- YENIDEN CALISTIRMA KILIDI
 --
--- supabase/supabase_rls_user_isolation.sql bir kez uygulandıysa bu dosyayı
--- TEKRAR ÇALIŞTIRMAYIN. Bu dosya zayıf `auth.uid() IS NOT NULL` politikalarını
--- yeniden oluşturur; PostgreSQL izin verici (permissive) politikaları OR ile
--- birleştirdiği için o zayıf politika geri geldiğinde `auth.uid() = user_id`
--- yalıtımı SESSİZCE çöker — hata vermez, sadece herkes herkesin verisini görür.
+-- supabase/supabase_rls_user_isolation.sql bir kez uygulandiysa bu dosyayi
+-- TEKRAR CALISTIRMAYIN. Bu dosya zayif `auth.uid() IS NOT NULL` politikalarini
+-- yeniden olusturur ve PostgreSQL izin verici (permissive) politikolari OR ile
+-- birlestirdigi icin o zayif politika geri geldiginde `auth.uid() = user_id`
+-- yalitimi SESSIZCE coker. Asagidaki kilit bunu imkansiz kilar.
 --
--- Aşağıdaki kilit bunu imkânsız kılar: user_id sütunu varsa dosya ilk satırda
--- durur (SQL Editor tek transaction koştuğu için hiçbir şey yarım kalmaz).
+-- NOT: Bu blok TEK SATIR ve tek `$$` cifti olarak yazildi. Cok satirli DO
+-- bloklari ve satirlara bolunmus RAISE metinleri bazi SQL istemcilerinde
+-- yanlis bolunup "syntax error at or near" hatasi verebiliyor.
 -- ==============================================================================
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-     WHERE table_schema = 'public'
-       AND table_name   = 'portfolio_positions'
-       AND column_name  = 'user_id'
-  ) THEN
-    RAISE EXCEPTION
-      'DURDURULDU: supabase_rls_user_isolation.sql zaten uygulanmış '
-      '(portfolio_positions.user_id mevcut). Bu dosyayı tekrar çalıştırmak zayıf '
-      '"auth.uid() IS NOT NULL" politikalarını geri getirip kullanıcı yalıtımını '
-      'SESSİZCE çökertirdi. Bu dosyayı atlayın.';
-  END IF;
-END $$;
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'portfolio_positions' AND column_name = 'user_id') THEN RAISE EXCEPTION 'DURDURULDU: supabase_rls_user_isolation.sql zaten uygulanmis (portfolio_positions.user_id mevcut). Bu dosyayi tekrar calistirmak zayif "auth.uid() IS NOT NULL" politikalarini geri getirip kullanici yalitimini SESSIZCE cokertirdi. Bu dosyayi atlayin.'; END IF; END $$;
 -- 1) fund_holdings — her fonun GÜNCEL hisse içeriği (bir hisse = bir satır)
 CREATE TABLE IF NOT EXISTS fund_holdings (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

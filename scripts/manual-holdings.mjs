@@ -58,8 +58,25 @@ function fail(msg) {
   process.exit(1);
 }
 
-const [, , inputPath, outputPath] = process.argv;
-if (!inputPath) fail('kullanım: node scripts/manual-holdings.mjs <veri.json> [çıktı.sql]');
+/**
+ * --schema=old|new|auto   (varsayılan: auto)
+ *
+ *   auto → DO bloğu runtime'da user_id sütununa bakar (hem eski hem yeni şema)
+ *   old  → DÜZ INSERT, DO bloğu YOK. Yalnızca RLS migrasyonu ÖNCESİ şema.
+ *   new  → DÜZ INSERT, user_id'li. Yalnızca RLS migrasyonu SONRASI şema.
+ *
+ * `old`/`new` modlarında dosyada HİÇ `DO`/`$$` bulunmaz. Bazı SQL istemcileri
+ * dolar-alıntılı ($$) blokları yanlış böldüğü için bu modlar daha güvenlidir.
+ */
+const schemaArg = (process.argv.find((a) => a.startsWith('--schema=')) ?? '--schema=auto')
+  .slice('--schema='.length);
+if (!['old', 'new', 'auto'].includes(schemaArg)) {
+  fail(`--schema '${schemaArg}' geçersiz — old | new | auto olmalı`);
+}
+
+const args = process.argv.filter((a) => !a.startsWith('--'));
+const [, , inputPath, outputPath] = args;
+if (!inputPath) fail('kullanım: node scripts/manual-holdings.mjs <veri.json> [çıktı.sql] [--schema=old|new|auto]');
 
 let data;
 try {
@@ -176,28 +193,48 @@ function valuesBlock(indent) {
 
 const fundCodes = Array.from(new Set(rows.map((r) => r.fund_code)));
 
-const sql = `-- =============================================================================
--- MANUEL FON İÇERİĞİ — ${fundCodes.join(', ')}
--- Üreten: scripts/manual-holdings.mjs  (elle düzenlemeyin, script'ten üretin)
--- source = '${source}'
---
--- İDMPOTENT: tekrar çalıştırmak güvenlidir (ON CONFLICT DO UPDATE).
--- ŞEMA UYUMLU: hem user_id'siz eski şemada hem supabase_rls_user_isolation.sql
--- sonrasındaki şemada çalışır.
---
--- ⚠️ source='${source}' NE DEMEK:
-${source === 'manual'
-    ? `--   Sync job'u bu satırları ASLA ezmez. Ayrıca as_of_date son 45 gün içindeyse
---   bu fonların otomatik sync'i TAMAMEN atlanır. Gerçek veri geldiğinde
---   aşağıdaki "TEMİZLİK" bloğunu çalıştırın.`
-    : `--   Sync job'u başarılı bir çekim yaptığında bu satırları EZER, yeni listede
---   olmayanları SİLER. Yani bunlar gerçekten geçici placeholder.`}
--- =============================================================================
+const IN_LIST = fundCodes.map((c) => `'${c}'`).join(', ');
+const EXPECTED = fundCodes.map((c) => `${c} = ${rows.filter((r) => r.fund_code === c).length} hisse`).join(', ');
 
-DO $body$
+const UPDATE_SET = `  company_name = EXCLUDED.company_name,
+  weight_pct   = EXCLUDED.weight_pct,
+  as_of_date   = EXCLUDED.as_of_date,
+  source       = EXCLUDED.source,
+  notes        = EXCLUDED.notes,
+  updated_at   = now()`;
+
+/** ESKİ şema: user_id sütunu YOK. Düz INSERT, DO bloğu yok. */
+const insertOld = `INSERT INTO public.fund_holdings
+  (fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+VALUES
+${valuesBlock(2)}
+ON CONFLICT (fund_code, ticker) DO UPDATE SET
+${UPDATE_SET};`;
+
+/**
+ * YENİ şema: user_id NOT NULL. SQL Editor'de postgres rolüyle koştuğunuz için
+ * auth.uid() NULL'dır; sahibi auth.users'tan ilk kullanıcıyla çözüyoruz.
+ * Birden fazla hesabınız varsa SELECT satırını kendi UUID'nizle değiştirin.
+ */
+const insertNew = `-- ⚠️ Birden fazla hesabınız varsa alttaki SELECT'i kendi UUID'nizle değiştirin:
+--   SELECT id, email FROM auth.users ORDER BY created_at;
+INSERT INTO public.fund_holdings
+  (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+SELECT (SELECT id FROM auth.users ORDER BY created_at LIMIT 1),
+       v.fund_code, v.ticker, v.company_name,
+       v.weight_pct::numeric, v.as_of_date::date, v.source, v.notes
+FROM (
+  VALUES
+${valuesBlock(4)}
+  ) AS v(fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+ON CONFLICT (user_id, fund_code, ticker) DO UPDATE SET
+${UPDATE_SET};`;
+
+/** AUTO: runtime'da şemayı tespit eder. DO/$$ bloğu içerir. */
+const insertAuto = `DO $body$
 DECLARE
   has_user_id BOOLEAN;
-  n_rows INT := ${rows.length};
+  owner UUID;
 BEGIN
   SELECT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -207,39 +244,29 @@ BEGIN
   ) INTO has_user_id;
 
   IF has_user_id THEN
-    -- YENİ ŞEMA: user_id zorunlu. Oturumla (SQL Editor'de postgres rolü)
-    -- auth.uid() NULL olacağı için sahibi açıkça belirtiyoruz.
-    DECLARE
-      owner UUID;
-    BEGIN
-      SELECT id INTO owner FROM auth.users ORDER BY created_at LIMIT 1;
-      IF owner IS NULL THEN
-        RAISE EXCEPTION 'auth.users boş — satırların sahibi belirlenemiyor. Önce terminalden hesap oluşturun.';
-      END IF;
+    SELECT id INTO owner FROM auth.users ORDER BY created_at LIMIT 1;
+    IF owner IS NULL THEN
+      RAISE EXCEPTION 'auth.users boş — satırların sahibi belirlenemiyor.';
+    END IF;
 
-      INSERT INTO public.fund_holdings
-        (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
-      -- v.as_of_date::date ŞART: VALUES içindeki '2026-07-31' literalini PostgreSQL
-      -- text olarak çıkarımlar; INSERT..SELECT örtük cast yapmadığı için
-      -- "column as_of_date is of type date but expression is of type text" verir.
-      SELECT owner, v.fund_code, v.ticker, v.company_name,
-             v.weight_pct::numeric, v.as_of_date::date, v.source, v.notes
-      FROM (
-        VALUES
-${valuesBlock(10)}
-      ) AS v(fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
-      ON CONFLICT (user_id, fund_code, ticker) DO UPDATE SET
-        company_name = EXCLUDED.company_name,
-        weight_pct   = EXCLUDED.weight_pct,
-        as_of_date   = EXCLUDED.as_of_date,
-        source       = EXCLUDED.source,
-        notes        = EXCLUDED.notes,
-        updated_at   = now();
+    INSERT INTO public.fund_holdings
+      (user_id, fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+    SELECT owner, v.fund_code, v.ticker, v.company_name,
+           v.weight_pct::numeric, v.as_of_date::date, v.source, v.notes
+    FROM (
+      VALUES
+${valuesBlock(8)}
+    ) AS v(fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
+    ON CONFLICT (user_id, fund_code, ticker) DO UPDATE SET
+      company_name = EXCLUDED.company_name,
+      weight_pct   = EXCLUDED.weight_pct,
+      as_of_date   = EXCLUDED.as_of_date,
+      source       = EXCLUDED.source,
+      notes        = EXCLUDED.notes,
+      updated_at   = now();
 
-      RAISE NOTICE '% satır yazıldı (yeni şema, sahip %)', n_rows, owner;
-    END;
+    RAISE NOTICE '% satır yazıldı (yeni şema, sahip %)', ${rows.length}, owner;
   ELSE
-    -- ESKİ ŞEMA: user_id sütunu henüz yok
     INSERT INTO public.fund_holdings
       (fund_code, ticker, company_name, weight_pct, as_of_date, source, notes)
     VALUES
@@ -252,30 +279,56 @@ ${valuesBlock(6)}
       notes        = EXCLUDED.notes,
       updated_at   = now();
 
-    RAISE NOTICE '% satır yazıldı (eski şema)', n_rows;
+    RAISE NOTICE '% satır yazıldı (eski şema)', ${rows.length};
   END IF;
 END
-$body$;
+$body$;`;
+
+const body = schemaArg === 'old' ? insertOld : schemaArg === 'new' ? insertNew : insertAuto;
+
+const SCHEMA_NOTE = {
+  old: '-- ŞEMA: ESKİ (user_id YOK) — supabase_rls_user_isolation.sql ÖNCESİ.\n-- DO/$$ bloğu İÇERMEZ; her SQL istemcisinde sorunsuz koşar.',
+  new: '-- ŞEMA: YENİ (user_id VAR) — supabase_rls_user_isolation.sql SONRASI.\n-- DO/$$ bloğu İÇERMEZ; her SQL istemcisinde sorunsuz koşar.',
+  auto: "-- ŞEMA: OTOMATİK — DO bloğu runtime'da user_id sütununa bakar.\n-- (Bazı SQL istemcileri $$ bloklarını yanlış böler; sorun çıkarsa\n--  --schema=old veya --schema=new ile yeniden üretin.)",
+}[schemaArg];
+
+const sql = `-- =============================================================================
+-- MANUEL FON İÇERİĞİ — ${fundCodes.join(', ')}
+-- Üreten: scripts/manual-holdings.mjs --schema=${schemaArg}  (elle düzenlemeyin)
+-- source = '${source}' · ${rows.length} satır
+--
+-- İDEMPOTENT: tekrar çalıştırmak güvenlidir (ON CONFLICT DO UPDATE).
+--
+${SCHEMA_NOTE}
+--
+-- ⚠️ source='${source}' NE DEMEK:
+${source === 'manual'
+    ? `--   Sync job'u bu satırları ASLA ezmez. Ayrıca as_of_date son 45 gün içindeyse
+--   bu fonların otomatik sync'i TAMAMEN atlanır. Gerçek veri geldiğinde
+--   aşağıdaki "TEMİZLİK" bloğunu çalıştırın.`
+    : `--   Sync job'u başarılı bir çekim yaptığında bu satırları EZER, yeni listede
+--   olmayanları SİLER. Yani bunlar gerçekten geçici placeholder.`}
+-- =============================================================================
+
+${body}
 
 -- -----------------------------------------------------------------------------
 -- DOĞRULAMA — çalıştırdıktan sonra bu sorguyu koşun
+-- Beklenen: ${EXPECTED}
 -- -----------------------------------------------------------------------------
 SELECT fund_code, count(*) AS hisse_sayisi,
        round(sum(weight_pct)::numeric, 2) AS toplam_agirlik,
        max(as_of_date) AS donem, source
   FROM fund_holdings
- WHERE fund_code IN (${fundCodes.map((c) => `'${c}'`).join(', ')})
+ WHERE fund_code IN (${IN_LIST})
  GROUP BY fund_code, source
  ORDER BY fund_code;
 
--- Beklenen: ${fundCodes.map((c) => `${c} = ${rows.filter((r) => r.fund_code === c).length} hisse`).join(', ')}
-
 -- -----------------------------------------------------------------------------
 -- TEMİZLİK (yalnızca gerektiğinde, yorumu kaldırıp çalıştırın)
--- Gerçek KAP/sync verisi geldiğinde bu manuel satırları kaldırmak için:
 -- -----------------------------------------------------------------------------
 -- DELETE FROM fund_holdings
---  WHERE fund_code IN (${fundCodes.map((c) => `'${c}'`).join(', ')})
+--  WHERE fund_code IN (${IN_LIST})
 --    AND source = '${source}'
 --    AND notes LIKE 'manuel giriş (geçici)%';
 `;
