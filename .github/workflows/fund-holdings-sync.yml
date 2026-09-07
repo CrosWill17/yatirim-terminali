@@ -31,6 +31,10 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # service_role RLS'i atlar ve auth.uid() NULL'dır; fund_holdings.user_id
+          # NOT NULL olduğu için job satırları KİMİN adına yazdığını bilmeli.
+          # Değer: Supabase → Authentication → Users → kendi hesabınızın UUID'si.
+          SUPABASE_OWNER_USER_ID: ${{ secrets.SUPABASE_OWNER_USER_ID }}
         run: npx -y tsx@4 scripts/fund_holdings/sync.ts
 
       - name: "Teşhis: DFI ham HTML arşiv (yalnızca tanı amaçlı, hiçbir tabloya yazmaz)"

@@ -116,8 +116,16 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Re
  * yani değişim yüzdesi GERÇEK günlük değişimdir).
  * Tazelik kontrolü: regularMarketTime 42 saatten eskiyse veri reddedilir
  * (Yahoo'nun donmuş ^XU100 gibi bozuk feed'lerini yakalar).
+ *
+ * DİKKAT — SEANS KAPISI YOK: Saat filtresi (isBistOpen) bilerek BURADA değil,
+ * çağıranlarda (getStockQuotes / getFundQuotes / getMarketData). Bu fonksiyon
+ * dışa açık çünkü scripts/fund_holdings/day-end.ts 18:20'de, yani seans
+ * KAPANDIKTAN sonra kapanış fiyatını okumak zorunda. Cron'un gördüğü fiyat ile
+ * uygulamanın gösterdiği fiyat AYNI fonksiyondan gelmeli; aksi hâlde gün sonu
+ * tahmini ekrandaki "anlık tahmin"den sapar ve kalibrasyon yanlış eğitilir.
+ * Uygulama içinden doğrudan çağırmayın — seans kapısını atlar.
  */
-async function fetchYahooQuote(symbol: string): Promise<MarketQuote | null> {
+export async function fetchYahooQuote(symbol: string): Promise<MarketQuote | null> {
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
     const res = await fetchWithTimeout(url);
@@ -735,6 +743,26 @@ export function __resetQuoteCaches(): void {
  * Önce fon NAV (fonaly), sonra hisse (Yahoo .IS). İlk başarılı döner.
  * Çözülemeyen → null (VERİ EKSİK).
  */
+/**
+ * Karışık fiyat birleştirmesinin ÖNCELİK KURALI — tek doğru kaynak.
+ *
+ * Fon fiyatı (fonaly) öncelikli: TEFAS fonları için Yahoo .IS yanlış olabilir,
+ * fonaly doğrudur. Hisse için fonaly null döner, Yahoo döner.
+ *
+ * Neden ayrı fonksiyon: scripts/fund_holdings/day-end.ts 18:20'de seans kapısı
+ * ve cache olmadan fiyat çeker. Öncelik burada tekrar yazılsaydı iki yol
+ * zamanla ayrışabilir, gün sonu tahmini ekrandaki "anlık tahmin"den sapardı.
+ */
+export function mergeMixedQuotes(
+  codes: string[],
+  stockQs: Record<string, MarketQuote | null>,
+  fundQs: Record<string, MarketQuote | null>,
+): Record<string, MarketQuote | null> {
+  const out: Record<string, MarketQuote | null> = {};
+  for (const c of codes) out[c] = fundQs[c] ?? stockQs[c] ?? null;
+  return out;
+}
+
 export async function getMixedQuotes(codes: string[]): Promise<Record<string, MarketQuote | null>> {
   const wanted = Array.from(
     new Set(codes.map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z0-9]{2,10}$/.test(c)))
@@ -742,11 +770,48 @@ export async function getMixedQuotes(codes: string[]): Promise<Record<string, Ma
 
   const [stockQs, fundQs] = await Promise.all([getStockQuotes(wanted), getFundQuotes(wanted)]);
 
-  const out: Record<string, MarketQuote | null> = {};
-  for (const c of wanted) {
-    // Fon fiyatı öncelikli: TEFAS fonları için Yahoo .IS yanlış olabilir, fonaly doğru
-    // Hisse için fonaly null dönecek, Yahoo dönecek
-    out[c] = fundQs[c] ?? stockQs[c] ?? null;
-  }
-  return out;
+  return mergeMixedQuotes(wanted, stockQs, fundQs);
 }
+
+/**
+ * SEANS KAPISI VE CACHE OLMADAN ham fiyat çeker.
+ *
+ * Yalnızca scripts/fund_holdings/day-end.ts için: 18:20'de BIST kapandığı için
+ * getMixedQuotes (isBistOpen kapılı) taze veri döndürmez. Gün sonu tahmini
+ * kapanış fiyatıyla hesaplanmak zorunda.
+ *
+ * Uygulama içinden ÇAĞIRMAYIN — seans kısıtını ve rate limit'i atlar.
+ * Öncelik kuralı getMixedQuotes ile aynı (mergeMixedQuotes).
+ */
+export async function fetchRawMixedQuotes(
+  codes: string[],
+  concurrency = FETCH_CONCURRENCY,
+): Promise<Record<string, MarketQuote | null>> {
+  const wanted = Array.from(
+    new Set(codes.map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z0-9]{2,10}$/.test(c)))
+  ).slice(0, QUOTE_LIMIT);
+
+  const stockQs: Record<string, MarketQuote | null> = {};
+  const fundQs: Record<string, MarketQuote | null> = {};
+
+  let i = 0;
+  const worker = async () => {
+    while (i < wanted.length) {
+      const c = wanted[i++];
+      // SIRAYLA, kısa devre ile: her iş parçacığı aynı anda TEK istek tutar,
+      // böylece toplam eşzamanlı istek FETCH_CONCURRENCY'yi aşmaz.
+      // (Paralel Promise.all ile 6 işçi × 2 istek = 12 eşzamanlı istek olurdu.)
+      //
+      // Kısa devre ayrıca İSTEK SAYISINI da düşürür: TEFAS fonunda fonaly
+      // tuttuğunda Yahoo'ya hiç gidilmez. Sonuç değişmez çünkü birleştirme
+      // kuralı zaten fonaly'yi önce alır (fundQs ?? stockQs).
+      const f = await fetchFonalyQuote(c).catch(() => null);
+      fundQs[c] = f;
+      stockQs[c] = f ? null : await fetchYahooQuote(toYahooSymbol(c)).catch(() => null);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+
+  return mergeMixedQuotes(wanted, stockQs, fundQs);
+}
+

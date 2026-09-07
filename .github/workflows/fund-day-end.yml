@@ -1,0 +1,51 @@
+name: fund-day-end
+
+# -----------------------------------------------------------------------------
+# 18:20 İSTANBUL = 15:20 UTC gün sonu tahmin snapshot'ı.
+#
+# ÖNEMLİ — GitHub Actions cron'u UTC'de koşar. Türkiye 2016'dan beri yaz saati
+# uygulamıyor, yıl boyu UTC+3; bu yüzden 18:20 İstanbul her zaman 15:20 UTC.
+#
+# ÖNEMLİ — Zamanlanmış işler YALNIZCA varsayılan daldan (main) tetiklenir.
+# Bu dosya feature branch'te durduğu sürece cron ÇALIŞMAZ; main'e merge
+# edilmelidir. Elle denemek için workflow_dispatch kullanılabilir (dal fark etmez).
+#
+# Cron dakikalarca gecikebilir. Bu sorun değil: lib/dayEnd.ts 18:20'den SONRASINI
+# da geçerli sayar (yakalama), yani 18:35'te koşsa bile aynı günün snapshot'ını
+# doğru tarihle yazar.
+# -----------------------------------------------------------------------------
+on:
+  schedule:
+    - cron: '20 15 * * 1-5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fund-day-end
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Kur (npm)
+        run: npm ci
+
+      - name: Gün sonu tahminlerini hesapla + fund_nav_daily'ye yaz
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # service_role RLS'i atlar ve auth.uid() NULL'dır; fund_nav_daily.user_id
+          # NOT NULL olduğu için job kime yazdığını bilmek zorunda.
+          SUPABASE_OWNER_USER_ID: ${{ secrets.SUPABASE_OWNER_USER_ID }}
+        run: npx -y tsx@4 scripts/fund_holdings/day-end.ts

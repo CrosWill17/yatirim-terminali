@@ -24,6 +24,7 @@ import {
   getStockQuotes,
   getMixedQuotes,
   toYahooSymbol,
+  fetchRawMixedQuotes,
   __resetQuoteCaches,
 } from './marketData';
 
@@ -280,5 +281,71 @@ describe('seans kapalıyken dış istek atılmaz', () => {
     const r = await getStockQuotes(['THYAO']);
     expect(urlLog).toHaveLength(0);
     expect(r.THYAO).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchRawMixedQuotes — 18:20 gün sonu cron'unun fiyat yolu.
+//
+// Bu fonksiyonun VAR OLMA SEBEBİ: getMixedQuotes isBistOpen() kapılıdır ve
+// 18:20'de BIST kapalı olduğu için taze veri döndürmez. Gün sonu cron'u
+// kapanış fiyatını okumak zorunda. Aşağıdaki ilk test tam olarak bunu kilitler.
+// ---------------------------------------------------------------------------
+describe('fetchRawMixedQuotes — seans kapalıyken de çeker', () => {
+  it('18:00 sonrası (seans KAPALI) fiyat döndürür — getMixedQuotes dönmezdi', async () => {
+    vi.setSystemTime(CLOSED_NOW); // Per 20:30 Istanbul
+
+    // Aynı kod, kapalı seansta cache'li yoldan:
+    const gated = await getMixedQuotes(['THYAO']);
+    expect(urlLog).toHaveLength(0); // kapalı → dışarı çıkmadı
+    expect(gated.THYAO).toBeNull();
+
+    // Aynı kod, ham yoldan:
+    urlLog = [];
+    const raw = await fetchRawMixedQuotes(['THYAO']);
+    expect(urlLog.length).toBeGreaterThan(0);
+    expect(raw.THYAO).not.toBeNull();
+    // Mock'ta fonaly her kod için 200 döner ve öncelik fonaly'de → +1,25
+    expect(raw.THYAO!.changePct).toBeCloseTo(1.25, 5);
+  });
+
+  it('fonaly önceliklidir (getMixedQuotes ile AYNI kural)', async () => {
+    const r = await fetchRawMixedQuotes(['ABG']);
+    // fonaly 10,5 / +1,25 ; Yahoo 110/100 → fonaly kazanmalı
+    expect(r.ABG!.changePct).toBeCloseTo(1.25, 5);
+    expect(r.ABG!.price).toBeCloseTo(10.5, 5);
+  });
+
+  it('KISA DEVRE: fonaly tuttuğunda Yahoo\'ya HİÇ gidilmez (istek tasarrufu)', async () => {
+    urlLog = [];
+    await fetchRawMixedQuotes(['ABG']);
+    expect(urlLog.some((u) => u.includes('fonaly.com'))).toBe(true);
+    expect(urlLog.some((u) => u.includes('finance.yahoo.com'))).toBe(false);
+  });
+
+  it('fonaly 404 → Yahoo yedeği DENENİR', async () => {
+    urlLog = [];
+    // 'YOK' fonaly'de 404 → Yahoo'ya düşmeli (orada da 404 ama istek atıldı)
+    await fetchRawMixedQuotes(['YOK']);
+    expect(urlLog.some((u) => u.includes('fonaly.com'))).toBe(true);
+    expect(urlLog.some((u) => u.includes('finance.yahoo.com'))).toBe(true);
+  });
+
+  it('her ikisi de 404 → null (çökmez)', async () => {
+    const r = await fetchRawMixedQuotes(['YOK']);
+    expect('YOK' in r).toBe(true);
+    expect(r.YOK).toBeNull();
+  });
+
+  it('eşzamanlılık FETCH_CONCURRENCY (6) ile sınırlı — 20 kod', async () => {
+    const codes = Array.from({ length: 20 }, (_, i) => `KOD${i}`);
+    await fetchRawMixedQuotes(codes);
+    expect(peakInFlight).toBeLessThanOrEqual(6);
+    expect(peakInFlight).toBeGreaterThan(1);
+  });
+
+  it('kodları normalize eder: küçük harf + tekrar edenler tekilleşir', async () => {
+    const r = await fetchRawMixedQuotes(['thyao', 'THYAO', ' thyao ']);
+    expect(Object.keys(r)).toEqual(['THYAO']);
   });
 });
