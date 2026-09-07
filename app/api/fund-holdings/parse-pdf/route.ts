@@ -54,8 +54,17 @@ export async function POST(req: NextRequest) {
     const buffer = Buffer.from(await file.arrayBuffer());
 
     // pdf-parse dynamic import (ESM uyumu için)
+    //
+    // ÖNEMLİ: paket KÖKÜ ('pdf-parse') DEĞİL, iç modül yüklenir.
+    // pdf-parse@1.1.1'in index.js'i `if (!module.parent) { ... }` debug bloğu
+    // içerir ve o blok './test/data/05-versions-space.pdf' dosyasını
+    // readFileSync ile okur. Webpack'in modül sarmalayıcısı (`__webpack_require__.nmd`)
+    // `module.parent` alanını HİÇ set etmediği için Next.js server bundle'ında
+    // `!module.parent === true` olur → modül yüklenirken ENOENT fırlar ve bu
+    // uç her çağrıda 500 döner. İç modül (lib/pdf-parse.js) o bloğu içermez.
     // @ts-ignore - no types
-    const pdfParse = (await import('pdf-parse')).default as any;
+    const mod: any = await import('pdf-parse/lib/pdf-parse.js');
+    const pdfParse = (mod.default ?? mod) as any;
     const data = await pdfParse(buffer);
     const text: string = data.text || '';
 

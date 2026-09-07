@@ -3,10 +3,12 @@
 import React, { useMemo, useState } from 'react';
 import { Layers, Pencil, PlusCircle, Save, Trash2, MessageCircle, TrendingUp, CheckCircle, XCircle, Camera, FileText, Upload, Loader2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
-import type { FundHoldingRow, SocialPrediction } from '@/lib/types';
+import type { FundHoldingRow, FundNavDailyRow, SocialPrediction } from '@/lib/types';
+import { calibrateEstimate, computeCalibrationFactor } from '@/lib/fundCalibration';
 import type { HoldingPrice, FundPrediction } from '@/lib/fundHoldings';
 import { computeFundPrediction, summarizeHoldingRows } from '@/lib/fundHoldings';
 import { formatPublic } from '@/lib/mask';
+import { TÜR_LABEL } from '@/lib/assetMeta';
 import { shouldAutoResearchFund } from '@/lib/fundCodes';
 import type { FundHoldingProposal } from '@/lib/repo';
 
@@ -24,6 +26,10 @@ interface Props {
   prices: Record<string, HoldingPrice | null>;
   predictions?: SocialPrediction[];
   proposals?: FundHoldingProposal[];
+  /** fund_nav_daily — gün sonu tahmin snapshot'ları + gerçekleşen getiriler. */
+  navDaily?: FundNavDailyRow[];
+  /** 18:20 snapshot'ı kaydeder. Verilmezse buton gizlenir. */
+  onSaveDayEnd?: (fundCode: string, navDate: string, estimatedPct: number, coveredPct: number) => Promise<void>;
   portfolioFundCodes?: string[];
   masked: boolean;
   /** Veritabanı hazır değilse form devre dışı (yazma denemesi yapılmaz). */
@@ -61,7 +67,7 @@ const EMPTY_FORM = {
  * source=manual + notes=twitter-photo, proposal approved. Red → rejected.
  * Otomatik fund_holdings yazımı YOK — sadece manuel onay ile.
  */
-export default function FundContentTab({ rows, prices, predictions = [], proposals = [], portfolioFundCodes = [], masked, canWrite, onUpsert, onUpsertKapPdf, onDelete, onApproveProposal, onRejectProposal }: Props) {
+export default function FundContentTab({ rows, prices, predictions = [], proposals = [], navDaily = [], onSaveDayEnd, portfolioFundCodes = [], masked, canWrite, onUpsert, onUpsertKapPdf, onDelete, onApproveProposal, onRejectProposal }: Props) {
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
@@ -111,6 +117,49 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
     });
     return out;
   }, [byFund, prices]);
+
+  /**
+   * fund_nav_daily'yi fon bazında gruplar ve her fon için:
+   *   - dünün snapshot tahmini (nav_date < bugün, en yakın olan)
+   *   - dünün GERÇEKLEŞEN getirisi (actual_pct)
+   *   - öğrenilen kalibrasyon katsayısı
+   *
+   * "Dün" takvimden değil VERİDEN alınır: son işlem günü olmayan bir günde
+   * açılırsa (hafta sonu/tatil) en son kayıtlı gün gösterilir.
+   */
+  const navInfo = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const byFundNav = new Map<string, FundNavDailyRow[]>();
+    for (const r of navDaily) {
+      const list = byFundNav.get(r.fund_code) ?? [];
+      list.push(r);
+      byFundNav.set(r.fund_code, list);
+    }
+    const out = new Map<string, {
+      prev: FundNavDailyRow | null;
+      factor: number;
+      confidence: string;
+      samples: number;
+    }>();
+    byFundNav.forEach((list, code) => {
+      const sorted = [...list].sort((a, b) => b.nav_date.localeCompare(a.nav_date));
+      const prev = sorted.find((r) => r.nav_date < today) ?? null;
+      // Kalibrasyon yalnızca GERÇEKLEŞENİ bilinen günlerden öğrenilir.
+      const cal = computeCalibrationFactor(
+        sorted
+          .filter((r) => r.estimated_pct != null && r.actual_pct != null)
+          .map((r) => ({
+            estimated_pct: r.estimated_pct as number,
+            covered_pct: r.covered_pct,
+            actual_pct: r.actual_pct as number,
+          }))
+      );
+      out.set(code, { prev, factor: cal.factor, confidence: cal.confidence, samples: cal.sampleCount });
+    });
+    return out;
+  }, [navDaily]);
+
+  const [savingFund, setSavingFund] = useState<string | null>(null);
 
   // Sosyal tahminler — fon bazında grupla
   const socialByFund = useMemo(() => {
@@ -325,7 +374,68 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
           <div key={s.fundCode} className="bg-[#111726] border border-slate-800 rounded-lg overflow-hidden">
             <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="font-bold text-sky-300 text-sm">{s.fundCode}</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="font-bold text-sky-300 text-sm">{s.fundCode}</h3>
+
+                  {/* --- ÜÇ BİLGİ: anlık tahmin · dün gün sonu tahmini · dünün açıklananı --- */}
+                  {(() => {
+                    const ni = navInfo.get(s.fundCode);
+                    const factor = ni?.factor ?? 1;
+                    // ANLIK TAHMİN: ham tahmin → kapsam gross-up → öğrenilen katsayı.
+                    // Kalibrasyonun amacı bu sayıyı "dünün açıklananı"na yaklaştırmak.
+                    const live = pred && pred.predictedPct != null
+                      ? calibrateEstimate(pred.predictedPct, pred.coveredPct, factor)
+                      : null;
+                    const prevEst = ni?.prev?.estimated_pct ?? null;
+                    const prevAct = ni?.prev?.actual_pct ?? null;
+                    const chip = (label: string, val: number | null, hint: string) => (
+                      <span
+                        title={hint}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-mono border border-slate-700 bg-slate-900/80 whitespace-nowrap"
+                      >
+                        <span className="text-slate-500">{label}: </span>
+                        {val == null
+                          ? <span className="text-slate-500">—</span>
+                          : <span className={`font-bold ${val >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {val >= 0 ? '+' : ''}{formatPublic(val, { digits: 2 })}%
+                            </span>}
+                      </span>
+                    );
+                    return (
+                      <>
+                        {chip('anlık tahmin', live,
+                          `Ham %${pred ? formatPublic(pred.predictedPct ?? 0, { digits: 2 }) : '—'} × kapsam düzeltmesi × kalibrasyon katsayısı ${factor.toFixed(2)}` +
+                          (ni && ni.samples > 0 ? ` (${ni.samples} günlük geçmiş, güven: ${ni.confidence})` : ' (geçmiş yok, katsayı 1.00)'))}
+                        {chip('dün gün sonu tahmini', prevEst,
+                          ni?.prev ? `${ni.prev.nav_date} 18:20 snapshot'ı` : 'Henüz gün sonu kaydı yok — GÜN SONU KAYDET butonunu kullanın')}
+                        {chip('dünün açıklananı', prevAct,
+                          'TEFAS\'ın açıkladığı gerçek getiri. TLY/THF aynı gün ~22:00, DFI ertesi sabah ~08:00. Tahminin isabet ölçüsü bu.')}
+                      </>
+                    );
+                  })()}
+
+                  {onSaveDayEnd && pred && pred.predictedPct != null && (() => {
+                    const rawPct = pred.predictedPct as number;
+                    const covPct = pred.coveredPct;
+                    return (
+                    <button
+                      onClick={async () => {
+                        const date = new Date().toISOString().slice(0, 10);
+                        const ni = navInfo.get(s.fundCode);
+                        const live = calibrateEstimate(rawPct, covPct, ni?.factor ?? 1);
+                        setSavingFund(s.fundCode);
+                        try { await onSaveDayEnd(s.fundCode, date, Number(live.toFixed(4)), Number(covPct.toFixed(4))); }
+                        finally { setSavingFund(null); }
+                      }}
+                      disabled={!canWrite || savingFund === s.fundCode}
+                      title="Şu anki tahmini gün sonu tahmini olarak sabitle (18:20'den sonra basın)"
+                      className="px-2 py-0.5 rounded text-[10px] font-bold border border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900 disabled:opacity-40 whitespace-nowrap"
+                    >
+                      {savingFund === s.fundCode ? 'KAYDEDİLİYOR…' : 'GÜN SONU KAYDET'}
+                    </button>
+                    );
+                  })()}
+                </div>
                 <div className="text-[10px] text-slate-500 mt-1 space-x-3">
                   <span>📅 Rapor dönemi: <span className="text-slate-300">{s.asOfDate ?? '—'}</span></span>
                   <span>📦 Kaynak: <span className="text-slate-300">{s.sources.join(' + ') || '—'}</span></span>
@@ -413,7 +523,7 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#0d121f] text-slate-400 border-b border-slate-800">
                   <tr>
-                    <th className="p-3">HİSSE</th>
+                    <th className="p-3">VARLIK</th>
                     <th className="p-3">RESMÎ AD</th>
                     <th className="p-3 text-right">AĞIRLIK %</th>
                     <th className="p-3 text-right">GÜNLÜK %</th>
@@ -430,7 +540,17 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
                       : null;
                     return (
                       <tr key={r.id} className="hover:bg-slate-800/30">
-                        <td className="p-3 font-bold text-sky-400">{r.ticker}</td>
+                        <td className="p-3">
+                          <span className="font-bold text-sky-400">{r.ticker}</span>
+                          {r.asset_type === 'TEFAS_FON' && (
+                            <span
+                              title="Fonun alt fonu - fiyat TEFAS NAV'dan (fonaly.com), gunde bir yenilenir"
+                              className="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-950 text-violet-300 border border-violet-800"
+                            >
+                              {TÜR_LABEL.TEFAS_FON}
+                            </span>
+                          )}
+                        </td>
                         <td className="p-3 text-slate-300">{r.company_name ?? '—'}</td>
                         <td className="p-3 text-right text-slate-100 font-bold">
                           %{formatPublic(r.weight_pct, { digits: 2 })}

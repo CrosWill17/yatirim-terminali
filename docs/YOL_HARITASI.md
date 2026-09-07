@@ -48,23 +48,42 @@ sayfalarının hiçbiri görünmüyor.
 
 ## FAZ 1 — RLS / kullanıcı yalıtımı (P0 #1)
 
-**🟡 Durum:** BAŞLAMADIK — en yüksek öncelik, ama şema değiştirir.
+**✅ Durum: TAMAM (03.09.2026)**
 
-**Kapsam:**
-- Tüm veri tablolarına `user_id UUID REFERENCES auth.users(id)` ekleme.
-- RLS politikalarını `auth.uid() = user_id` yapma.
-- `repo.ts` fonksiyonlarına `user_id` taşıma (loadAll / write / upsert / insert / delete).
-- `app/page.tsx`'te oturumla birlikte `user_id`'yi sorgulara/oluşturmalara ekleme.
-- `app_settings` ve `portfolio_snapshots` için kullanıcı bazlı anahtar/şema kararı.
-- Mevcut veriyi kullanıcıya taşıyacak migration (opsiyonel tek kullanıcı destekli).
+**Yapılanlar:**
+- `supabase/supabase_rls_user_isolation.sql` eklendi (5. zorunlu SQL dosyası):
+  - 11 tabloya `user_id UUID NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE`
+  - Politikalar `auth.uid() IS NOT NULL` → **`auth.uid() = user_id`**
+  - Tekil kısıtlar kullanıcı bazlı bileşiğe çevrildi:
+    `(user_id,symbol)`, `(user_id,key)`, `(user_id,snapshot_date)`,
+    `(user_id,id)`, `(user_id,fund_code,ticker)`, `(user_id,cal_date,fund_code)`,
+    `(user_id,fund_code,ticker,source_tweet_id)`
+  - `fund_holdings_history` tetikleyicisi `user_id` taşıyor + `SECURITY DEFINER`
+  - Mevcut veri tek kullanıcıya backfill edilir; **birden fazla kullanıcı varsa
+    script bilerek hata verir** (kim kime ait otomatik karar vermez)
+- `lib/repo.ts`: tüm `onConflict` hedefleri bileşik yapıldı, `setInitialCapital`'a
+  `onConflict: 'user_id,key'` eklendi. Payload'larda `user_id` gönderilmiyor —
+  DB `DEFAULT auth.uid()` dolduruyor, `WITH CHECK` başkasının id'sini reddediyor.
+- `app/page.tsx`: `/api/market/quotes` ve `/api/social-parse` çağrılarına
+  `Authorization: Bearer` eklendi.
+- Sync job'ları (`fund_holdings/sync.ts`, `twitter_sync/sync.ts`,
+  `ocr_holdings.py`): `SUPABASE_OWNER_USER_ID` zorunlu; her yazıya `user_id`,
+  her okumaya `.eq('user_id', OWNER_ID)` eklendi. Sebep: `service_role` RLS'i
+  atlar ve o bağlamda `auth.uid()` NULL'dır.
+- İki workflow'a `SUPABASE_OWNER_USER_ID` secret'ı eklendi.
+- `scripts/dbtest/rls-check.mjs` + `npm run test:db`: **38 senaryo, gerçek
+  PostgreSQL'e karşı** (embedded-postgres). CI'da ayrı `rls` job'ı.
+- `lib/repo.test.ts`: 7 yeni test, tüm `onConflict` hedeflerini kilitliyor.
 
-**Karar noktası:** Bu depo tek kullanıcılı mı kalacak, yoksa gerçek çok kullanıcılı mı?
-- Tek kullanıcıysa bile `user_id` şart: ileride ikinci hesap açılırsa veri karışmaz.
-- Çok kullanıcılıysa ilk kurulum için herhesap kendi seed'ini almalı.
+**Karar noktası (çözüldü):** depo tek kullanıcılı kalsa bile `user_id` şarttı —
+ikinci hesap açılırsa veri karışmasın diye. Çok kullanıcılı senaryo de çalışıyor
+(bileşik tekil kısıtlar sayesinde).
 
-**Gerekli SQL dosyaları:**
-- `supabase/supabase_schema.sql` (yeniden düzenlenmiş)
-- `supabase/supabase_rls_user_isolation.sql` (yeni migration)
+**Doğrulama:** `npm run test:db` → **38 geçti, 0 kaldı**; `npm test` → **192 geçti**;
+`typecheck` ✅; `build` ✅.
+
+**Kalan:** `app_settings` ve `portfolio_snapshots` için ayrı şema kararı
+gerekmedi — bileşik anahtar yeterli oldu.
 
 ---
 
@@ -108,15 +127,16 @@ sayfalarının hiçbiri görünmüyor.
 
 ## FAZ 5 — Build / lint / dokümantasyon tutarlılığı (P2 #11, #12, #13, #14)
 
-**🟡 Durum:** BAŞLAMADIK
+**🟡 Durum:** KISMEN TAMAM (03.09.2026) — yalnızca ESLint kaldı
 
 **Kapsam:**
-- ESLint yapılandırması ekleyip `npm run lint`'i çalışır yapma.
-- README'deki CI workflow iddiasını gerçekle uyumlu hale getirme
-  (ya `.github/workflows/ci.yml` ekle, ya README'den kaldır).
-- Sürüm tek kaynak: `package.json`, README, header ("v3.1/v3.3/3.0.0" tutarsız).
-- `service_role` dokümantasyonunu güncelle (yalnızca GitHub Actions admin job'larında).
-- Kurulum rehberinde üç migration'ın zorunlu olduğunu netleştir.
+- ⬜ **HÂLÂ AÇIK:** ESLint yapılandırması ekleyip `npm run lint`'i çalışır yapma.
+  Şu an depoda hiçbir ESLint config yok; `next lint` interaktif kurulum prompt'u
+  açıyor ve CI'da kilitlenir. (`ls -a | grep eslint` → boş)
+- ✅ `.github/workflows/ci.yml` eklendi (typecheck + test×2 + build + bundle denetimi + RLS job).
+- ✅ Sürüm tek kaynak: `package.json` `3.4.0`, README başlığı v3.4.
+- ✅ `service_role` + `SUPABASE_OWNER_USER_ID` dokümantasyonu güncellendi (.env.example, README).
+- ✅ Kurulum rehberinde 5 SQL dosyasının da zorunlu olduğu netleştirildi (README + şema başlığı).
 
 ---
 
@@ -148,10 +168,10 @@ sayfalarının hiçbiri görünmüyor.
 | Faz | İş | Durum |
 |---|---|---|
 | FAZ 0 | `/api/market` token sızıntısı/fonksiyonel hatası | ✅ |
-| FAZ 1 | RLS kullanıcı yalıtımı | ⬜ |
+| FAZ 1 | RLS kullanıcı yalıtımı | ✅ (03.09.2026, 38 senaryo ile doğrulandı) |
 | FAZ 2 | Canlı/seed işaretleme + minor düzeltmeler | ⬜ |
 | FAZ 3 | Sosyal doğrulama mantığı | ⬜ |
 | FAZ 4 | Hata bildirimi / veri tutarlılığı | ⬜ |
-| FAZ 5 | Lint / dokümantasyon | ⬜ |
+| FAZ 5 | Lint / dokümantasyon | 🟡 dokümantasyon ✅, ESLint ⬜ |
 | FAZ 6 | Güvenlik / bağımlılık | ⬜ |
 | FAZ 7 | Test / regresyon | ⬜ |

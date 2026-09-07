@@ -13,10 +13,11 @@ import {
 import { calculateTax, calculateAccuracyScore, updateTrustScore } from '@/lib/calculations';
 import {
   Position, Decision, CashMovement, SocialPrediction, Transaction,
-  FundHoldingRow, WriteResult,
+  FundHoldingRow, WriteResult, FundNavDailyRow,
 } from '@/lib/types';
 import type { MarketData } from '@/lib/marketData';
 import { PUBLIC_SEED_MARKET } from '@/lib/marketSeedPublic';
+import { isBistOpen, marketStatusLabel } from '@/lib/marketHours';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { TÜR_LABEL } from '@/lib/assetMeta';
 import { ALL_FUND_CODES, TEFAS_FON_CODES, isFundCode, isPpfCode, shouldAutoResearchFund } from '@/lib/fundCodes';
@@ -24,7 +25,7 @@ import {
   loadAll, upsertPosition, upsertDecision, insertTransaction,
   insertCashMovement, insertPrediction, updatePrediction,
   setInitialCapital, saveDailySnapshot, upsertFundHolding, upsertFundHoldingKapPdf, upsertFundHoldingAuto, deleteFundHolding,
-  approveProposal, rejectProposal,
+  approveProposal, rejectProposal, loadNavDaily, upsertNavDailyEstimate,
 } from '@/lib/repo';
 import type { FundHoldingProposal } from '@/lib/repo';
 import { computeFundPrediction, displayablePrediction, FundPrediction, HoldingPrice } from '@/lib/fundHoldings';
@@ -74,6 +75,8 @@ export default function Home() {
   const [predictions, setPredictions] = useState<SocialPrediction[]>([]);
   const [fundHoldings, setFundHoldings] = useState<FundHoldingRow[]>([]);
   const [proposals, setProposals] = useState<FundHoldingProposal[]>([]);
+  /** fund_nav_daily — gün sonu tahmin snapshot'ları + gerçekleşen getiriler. */
+  const [navDaily, setNavDaily] = useState<FundNavDailyRow[]>([]);
   // Kanonik ad/tür eşlemesi SUNUCUDAN gelir (portföyü ele verdiği için bundle'da durmaz)
   const [assetMeta, setAssetMeta] = useState<Record<string, { name: string; type: Position['asset_type'] }>>({});
   const [holdingPrices, setHoldingPrices] = useState<Record<string, HoldingPrice | null>>({});
@@ -182,12 +185,25 @@ export default function Home() {
     });
   }, [assetMeta, positions]);
 
-  /* ------- Canlı piyasa verisi: girişli kullanıcı (60 sn) --------- */
+  /* ------- Canlı piyasa verisi: girişli kullanıcı (60 sn, yalnızca seans içinde) --------- */
+  const warnedClosedRef = useRef(false);
   useEffect(() => {
     if (!configured || isGuest) return; // misafir /api/market'i ÇAĞIRMAZ (P1)
     let cancelled = false;
     const load = () => {
       if (!accessToken) return;
+      // SEANS KAPALIYSA İSTEK ATMA (BIST hafta içi 10:00-18:00, Europe/Istanbul).
+      // Sunucu tarafı da aynı kontrolü yapıyor ama oraya kadar gitmek bile
+      // gereksiz: tarayıcı 60 sn'de bir boşuna ağ isteği üretmesin.
+      // Kapanışta son bilinen veri ekranda kalır — setMarket çağrılmıyor.
+      if (!isBistOpen()) {
+        if (!warnedClosedRef.current) {
+          warnedClosedRef.current = true;
+          console.info(`[market] ${marketStatusLabel()} — poll duraklatıldı, 10:00'da devam`);
+        }
+        return;
+      }
+      warnedClosedRef.current = false;
       fetch('/api/market', { headers: { Authorization: `Bearer ${accessToken}` } })
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => { if (!cancelled && d && d.indices) setMarket(d); })
@@ -201,7 +217,8 @@ export default function Home() {
   /* ------- Dinamik pozisyon fiyatları: yeni eklenen hisse/fon otomatik fiyat (5dk backoff) --------- */
   const failedQuotesRef = useRef<Record<string, number>>({});
   useEffect(() => {
-    if (!configured || isGuest || positions.length === 0) return;
+    // /api/market/quotes artık oturum istiyor (auth'suz scrape proxy'si olmasın)
+    if (!configured || isGuest || positions.length === 0 || !accessToken) return;
     const now = Date.now();
     const BACKOFF_MS = 5 * 60 * 1000; // fail ederse 5dk bekle
     // market.positions'da olmayan semboller (yeni eklenenler) — backoff'lu
@@ -213,7 +230,9 @@ export default function Home() {
     if (missing.length === 0) return;
     let cancelled = false;
     // Fon + hisse karışık — /api/market/quotes artık fonaly + Yahoo deniyor
-    fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`)
+    fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d?.quotes) {
@@ -256,7 +275,7 @@ export default function Home() {
         missing.forEach((c) => { failedQuotesRef.current[c] = now; });
       });
     return () => { cancelled = true; };
-  }, [positions, market.positions, configured, isGuest]);
+  }, [positions, market.positions, configured, isGuest, accessToken]);
 
   /* ------------------- Yazma takibi (P0) -------------------------- */
   const pendingRef = useRef(0);
@@ -373,6 +392,7 @@ export default function Home() {
       setPredictions(bundle.predictions);
       setFundHoldings(bundle.fundHoldings);
       setProposals((bundle as any).proposals ?? []);
+      setNavDaily(await loadNavDaily(90));
       setCashBalance(bundle.cashBalance ?? 0);
       setInitialCapitalState(bundle.initialCapital ?? 0);
       setDbState('connected');
@@ -384,9 +404,12 @@ export default function Home() {
   /* --------- Fon hisse fiyatları (P3 — günlük tahmin/etki) -------- */
   useEffect(() => {
     if (isGuest || fundHoldings.length === 0) { setHoldingPrices({}); return; }
+    if (!accessToken) return; // oturum yoksa uç 401 döner — boşa istek atma
     const codes = Array.from(new Set(fundHoldings.map((h) => h.ticker)));
     let cancelled = false;
-    fetch(`/api/market/quotes?symbols=${encodeURIComponent(codes.join(','))}`)
+    fetch(`/api/market/quotes?symbols=${encodeURIComponent(codes.join(','))}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d?.quotes) return;
@@ -401,7 +424,7 @@ export default function Home() {
       })
       .catch(() => { /* fiyatı eksik hisse → katkı 0 (VERİ EKSİK) */ });
     return () => { cancelled = true; };
-  }, [fundHoldings, isGuest]);
+  }, [fundHoldings, isGuest, accessToken]);
 
   /* --------- Yeni fonlar için içerik otomatik araştırma (P3 genişletme) -------- */
   const researchingRef = React.useRef<Set<string>>(new Set());
@@ -755,7 +778,11 @@ export default function Home() {
     try {
       const res = await fetch('/api/social-parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // /api/social-parse oturum doğruluyor (auth'suz dönemde handle sabiti sızıyordu)
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         body: JSON.stringify({ text: tweetInput }),
       });
       const data = await res.json();
@@ -891,10 +918,68 @@ export default function Home() {
     if (ok) setProposals((prev) => prev.filter((x) => x.id !== id));
   };
 
+  /**
+   * GÜN SONU KAYDET — 18:20 snapshot'ı.
+   * Anlık tahmini fund_nav_daily'ye sabitler. Aynı gün tekrar basılırsa üzerine yazar.
+   */
+  const handleSaveDayEnd = async (fundCode: string, navDate: string, estimatedPct: number, coveredPct: number) => {
+    const ok = await track('Gün sonu tahmini kaydet', upsertNavDailyEstimate({
+      fund_code: fundCode, nav_date: navDate, estimated_pct: estimatedPct, covered_pct: coveredPct,
+    }));
+    if (ok) {
+      setNavDaily((prev) => [
+        {
+          id: `${fundCode}-${navDate}`, fund_code: fundCode, nav_date: navDate,
+          estimated_pct: estimatedPct, covered_pct: coveredPct,
+          actual_pct: null, actual_nav: null, actual_at: null,
+          calib_factor: 1, status: 'estimated', source: 'app', notes: 'gun sonu tahmini',
+        },
+        ...prev.filter((r) => !(r.fund_code === fundCode && r.nav_date === navDate)),
+      ]);
+    }
+  };
+
+  /**
+   * VERİLERİ ÇEK — manuel yenileme.
+   * Otomatik polling yok: dış istek YALNIZ bu butona basılınca atılır.
+   * Endeks + fon içeriğindeki hisselerin fiyatlarını birlikte tazeler.
+   */
+  const [refreshing, setRefreshing] = useState(false);
+  const handleManualRefresh = async () => {
+    if (!accessToken || refreshing) return;
+    setRefreshing(true);
+    try {
+      const codes = Array.from(new Set(fundHoldings.map((h) => h.ticker)));
+      const [marketRes, quoteRes] = await Promise.all([
+        fetch('/api/market', { headers: { Authorization: `Bearer ${accessToken}` } }),
+        codes.length > 0
+          ? fetch(`/api/market/quotes?symbols=${encodeURIComponent(codes.join(','))}`, { headers: { Authorization: `Bearer ${accessToken}` } })
+          : Promise.resolve(null),
+      ]);
+      const m = await marketRes.json().catch(() => null);
+      if (m && m.indices) setMarket(m);
+      if (quoteRes && quoteRes.ok) {
+        const d = await quoteRes.json().catch(() => null);
+        if (d?.quotes) {
+          const map: Record<string, HoldingPrice | null> = {};
+          for (const code of Object.keys(d.quotes)) {
+            const q = d.quotes[code];
+            map[code] = q && Number.isFinite(q.price) && q.price > 0 && Number.isFinite(q.changePct)
+              ? { price: Number(q.price), changePct: Number(q.changePct) } : null;
+          }
+          setHoldingPrices(map);
+        }
+      }
+      setNavDaily(await loadNavDaily(90));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const handleSignedOut = () => {
     // Oturum kapandı: kişisel veriler bellekten de silinir (misafir görünümü temiz).
     setPositions([]); setDecisions([]); setTransactions([]); setCashMovements([]);
-    setPredictions([]); setFundHoldings([]); setProposals([]); setHoldingPrices({});
+    setPredictions([]); setFundHoldings([]); setProposals([]); setHoldingPrices({}); setNavDaily([]);
     setCashBalance(0); setInitialCapitalState(0);
     setWriteErrors({}); setLastSavedAt(null); setDbError(null);
     setAssetMeta({});
@@ -1199,15 +1284,13 @@ export default function Home() {
                 <p className="text-xs text-slate-400 mt-1">Canlı piyasa verileri, bilanço rasyoları ve @sevketozhan benchmark entegrasyonu</p>
               </div>
                   <button
-                    onClick={() => {
-                      if (!accessToken) return;
-                      fetch('/api/market', { headers: { Authorization: `Bearer ${accessToken}` } })
-                        .then((r) => r.json())
-                        .then((d) => { if (d && d.indices) setMarket(d); });
-                    }}
-                    className="bg-sky-600 hover:bg-sky-500 text-white text-xs font-mono font-bold px-4 py-2 rounded flex items-center gap-2"
+                    onClick={handleManualRefresh}
+                    disabled={refreshing || !accessToken}
+                    title="Endeks + fon hisselerinin fiyatlarını şimdi çek. Otomatik istek atılmaz."
+                    className="bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-mono font-bold px-4 py-2 rounded flex items-center gap-2"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" /> CANLI ANALİZİ GÜNCELLE
+                    <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+                    {refreshing ? 'ÇEKİLİYOR…' : 'VERİLERİ ÇEK'}
                   </button>
             </div>
 
@@ -1314,6 +1397,8 @@ export default function Home() {
             prices={holdingPrices}
             predictions={predictions}
             proposals={proposals}
+            navDaily={navDaily}
+            onSaveDayEnd={handleSaveDayEnd}
             portfolioFundCodes={Array.from(new Set(positions.filter((p) => p.asset_type === 'TEFAS_FON' || p.asset_type === 'PPF' || isFundCode(p.symbol)).map((p) => p.symbol.toUpperCase())))}
             masked={masked}
             canWrite={dbState === 'connected'}

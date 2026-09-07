@@ -10,13 +10,23 @@
  *  - Supabase yapılandırılmadıysa hiçbir şey "çalışıyor" gibi gösterilmez:
  *    kind='setup' hatası döner.
  *
+ * KULLANICI YALITIMI (supabase/supabase_rls_user_isolation.sql):
+ *  - Her tabloda `user_id UUID NOT NULL DEFAULT auth.uid()` var. Tarayıcı
+ *    oturumunun JWT'si PostgREST'e gittiği için user_id OTOMATİK dolar —
+ *    bu yüzden payload'larda user_id GÖNDERMİYORUZ (göndersek de RLS
+ *    WITH CHECK başkasının id'sini reddeder).
+ *  - `onConflict` hedefleri bu yüzden BİLEŞİK: 'user_id,symbol' vb.
+ *    Tekil kısıtlar kullanıcı bazlı; iki kullanıcı aynı sembolü tutabilir.
+ *  - Okumalarda .eq('user_id', ...) YOK: RLS zaten süzer, ekstra filtre
+ *    yanlışı gizler.
+ *
  * YAZMA HEDEFLERİ: her fonksiyon yalnızca kendi tablosuna yazar.
  */
 
 import { supabase, isSupabaseConfigured } from './supabase';
 import {
   Position, Decision, Transaction, CashMovement, SocialPrediction,
-  FundHoldingRow, RepoError, RepoErrorKind, WriteResult,
+  FundAssetType, FundHoldingRow, FundNavDailyRow, RepoError, RepoErrorKind, WriteResult,
 } from './types';
 
 function enabled(): boolean {
@@ -162,6 +172,8 @@ export async function loadAll(): Promise<LoadResult> {
         as_of_date: String(r.as_of_date ?? '').slice(0, 10),
         source: ['manual', 'calibration', 'kap-pdf'].includes(r.source) ? r.source : 'auto',
         notes: r.notes ?? null,
+        // Migration koşmadıysa sütun döndürülmez → 'HISSE' varsay (eski davranış).
+        asset_type: r.asset_type ?? 'HISSE',
       }));
     }
 
@@ -283,7 +295,7 @@ export function upsertPosition(p: Position): Promise<WriteResult> {
         current_action: p.current_action,
         rationale: p.rationale,
       },
-      { onConflict: 'symbol' }
+      { onConflict: 'user_id,symbol' }
     )
   );
 }
@@ -302,7 +314,7 @@ export function upsertDecision(d: Decision): Promise<WriteResult> {
         details: d.details,
         created_at: d.created_at,
       },
-      { onConflict: 'id' }
+      { onConflict: 'user_id,id' }
     )
   );
 }
@@ -369,7 +381,11 @@ export function updatePrediction(p: SocialPrediction): Promise<WriteResult> {
 
 export function setInitialCapital(value: number): Promise<WriteResult> {
   return write('setInitialCapital', () =>
-    supabase.from('app_settings').upsert({ key: 'initial_capital', value: String(value) })
+    supabase.from('app_settings').upsert(
+      { key: 'initial_capital', value: String(value) },
+      // app_settings'in PK'si artık bileşik: (user_id, key)
+      { onConflict: 'user_id,key' }
+    )
   );
 }
 
@@ -382,7 +398,7 @@ export function saveDailySnapshot(
   return write('saveDailySnapshot', () =>
     supabase.from('portfolio_snapshots').upsert(
       { snapshot_date: date, total_value: totalValue, cash_balance: cashBalance, breakdown },
-      { onConflict: 'snapshot_date' }
+      { onConflict: 'user_id,snapshot_date' }
     )
   );
 }
@@ -396,6 +412,23 @@ export interface FundHoldingDraft {
   weight_pct: number;
   as_of_date: string;
   notes?: string | null;
+  /**
+   * Varlık sınıfı. Verilmezse 'HISSE'.
+   * ÖNEMLİ: yalnızca supabase_fund_asset_type_migration.sql koştuysa gönderilir —
+   * aksi hâlde supabase "column asset_type does not exist" der ve YAZMA PATLAR.
+   * Bu yüzden assetTypePayload() sütunun var olup olmadığını bilmediğimiz
+   * durumlarda alanı hiç eklemiyor; DB'deki DEFAULT 'HISSE' devreye giriyor.
+   */
+  asset_type?: FundAssetType;
+}
+
+/**
+ * asset_type migration'ı geriye dönük uyumlu olsun diye: tip verilmediyse
+ * payload'a alanı HİÇ koyma. Böylece migration koşmamış projelerde eski
+ * davranış aynen sürer.
+ */
+function assetTypePayload(h: FundHoldingDraft): Record<string, string> {
+  return h.asset_type ? { asset_type: h.asset_type } : {};
 }
 
 /** Manuel override: source='manual' — otomatik sync job'u bu satırı asla ezmez. */
@@ -410,8 +443,9 @@ export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
         as_of_date: h.as_of_date,
         source: 'manual',
         notes: h.notes ?? 'manuel override (UI)',
+        ...assetTypePayload(h),
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
@@ -428,8 +462,9 @@ export function upsertFundHoldingKapPdf(h: FundHoldingDraft): Promise<WriteResul
         as_of_date: h.as_of_date,
         source: 'kap-pdf',
         notes: h.notes ?? 'KAP PDF (ana kaynak, ham veri)',
+        ...assetTypePayload(h),
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
@@ -446,8 +481,9 @@ export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 
         as_of_date: h.as_of_date,
         source: (h as any).source ?? 'auto',
         notes: h.notes ?? 'otomatik araştırma (fintables/rotaborsa)',
+        ...assetTypePayload(h),
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
@@ -507,3 +543,95 @@ export function rejectProposal(id: string): Promise<WriteResult> {
   );
 }
 
+/* --------------------- Gün sonu NAV: tahmin vs gerçekleşen ---------- */
+
+const navDailyFromRow = (r: any): FundNavDailyRow => ({
+  id: r.id,
+  fund_code: r.fund_code,
+  nav_date: String(r.nav_date ?? '').slice(0, 10),
+  estimated_pct: r.estimated_pct != null ? Number(r.estimated_pct) : null,
+  covered_pct: r.covered_pct != null ? Number(r.covered_pct) : null,
+  actual_pct: r.actual_pct != null ? Number(r.actual_pct) : null,
+  actual_nav: r.actual_nav != null ? Number(r.actual_nav) : null,
+  actual_at: r.actual_at ?? null,
+  calib_factor: r.calib_factor != null ? Number(r.calib_factor) : 1,
+  status: r.status ?? 'estimated',
+  source: r.source ?? 'app',
+  notes: r.notes ?? null,
+});
+
+/**
+ * Son `days` günlük geçmişi getirir (kalibrasyon bunu besler).
+ * Migration koşmadıysa sessizce boş döner — uygulama çökmez.
+ */
+export async function loadNavDaily(days = 90): Promise<FundNavDailyRow[]> {
+  if (!enabled()) return [];
+  try {
+    const since = new Date(Date.now() - days * 86400_000).toISOString().slice(0, 10);
+    const { data, error } = await supabase
+      .from('fund_nav_daily')
+      .select('*')
+      .gte('nav_date', since)
+      .order('nav_date', { ascending: false });
+    if (error || !data) return [];
+    return (data as any[]).map(navDailyFromRow);
+  } catch {
+    return [];
+  }
+}
+
+export interface NavDailyEstimateDraft {
+  fund_code: string;
+  nav_date: string;
+  estimated_pct: number;
+  covered_pct: number | null;
+  calib_factor?: number;
+  notes?: string | null;
+}
+
+/** 18:20 snapshot'ı yazar. Aynı gün tekrar koşmak tahmini GÜNCELLEMEZ
+ *  (ON CONFLICT'te estimated_pct korunmuyor → bilinçli: son yazan kazanır,
+ *  çünkü buton "şu anki tahmini sabitle" demek). */
+export function upsertNavDailyEstimate(d: NavDailyEstimateDraft): Promise<WriteResult> {
+  return write('upsertNavDailyEstimate', () =>
+    supabase.from('fund_nav_daily').upsert(
+      {
+        fund_code: d.fund_code,
+        nav_date: d.nav_date,
+        estimated_pct: d.estimated_pct,
+        covered_pct: d.covered_pct,
+        calib_factor: d.calib_factor ?? 1,
+        status: 'estimated',
+        source: 'app',
+        notes: d.notes ?? '18:20 gun sonu tahmini',
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,fund_code,nav_date' }
+    )
+  );
+}
+
+/**
+ * Gerçekleşen NAV'ı geriye dönük doldurur (DFI'de ertesi sabah).
+ * estimated_pct'e DOKUNMAZ — snapshot tarihsel kayıttır.
+ */
+export function updateNavDailyActual(
+  fundCode: string,
+  navDate: string,
+  actualPct: number,
+  actualNav: number | null,
+): Promise<WriteResult> {
+  return write('updateNavDailyActual', () =>
+    supabase
+      .from('fund_nav_daily')
+      .update({
+        actual_pct: actualPct,
+        actual_nav: actualNav,
+        actual_at: new Date().toISOString(),
+        status: 'both',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('fund_code', fundCode)
+      .eq('nav_date', navDate)
+  );
+}

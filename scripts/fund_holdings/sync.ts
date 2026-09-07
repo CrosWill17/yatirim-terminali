@@ -28,9 +28,28 @@ const DRY_RUN = process.env.DRY_RUN === '1';
 const FIXTURE_DIR = process.env.FIXTURE_DIR ?? ''; // ör. ./test/fixtures → {CODE}.html oku
 const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+/**
+ * Satırların sahibi olacak auth.users.id.
+ *
+ * service_role RLS'i ATLAR ve auth.uid() bu bağlamda NULL'dır; fund_holdings.user_id
+ * ise NOT NULL. Bu yüzden job hangi kullanıcı için yazdığını AÇIKÇA bilmek zorunda.
+ * Aynı sebeple tüm okumalar .eq('user_id', OWNER_ID) ile daraltılır — aksi hâlde
+ * service_role diğer kullanıcıların satırlarını da görüp ezerdi.
+ */
+const OWNER_ID = process.env.SUPABASE_OWNER_USER_ID ?? '';
 
 if (!DRY_RUN && (!SUPABASE_URL || !SERVICE_KEY)) {
   console.error('HATA: SUPABASE_URL ve SUPABASE_SERVICE_ROLE_KEY gerekli (ya da DRY_RUN=1 ile çalıştır).');
+  process.exit(1);
+}
+
+if (!DRY_RUN && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(OWNER_ID)) {
+  console.error(
+    'HATA: SUPABASE_OWNER_USER_ID eksik veya UUID değil.\n' +
+    '  supabase/supabase_rls_user_isolation.sql sonrası her satır bir kullanıcıya ait;\n' +
+    '  service_role ile yazan bu job sahibini açıkça belirtmek zorunda.\n' +
+    '  Değeri bulmak için: Supabase → Authentication → Users → kendi hesabınızın UUID\'si.'
+  );
   process.exit(1);
 }
 
@@ -109,13 +128,14 @@ async function main(): Promise<void> {
 
     // 1) Manuel ve KAP PDF override'ları koru: source='manual' ve 'kap-pdf' ASLA ezilmez (ham veri, onay gerektirmez)
     //    KAP PDF ana veri kaynağıdır (kullanıcı şartı)
-    const { data: existing } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('fund_code', fundCode);
-    const protectedTickers = new Set((existing ?? []).filter((e) => ['manual', 'kap-pdf', 'calibration'].includes(e.source)).map((e) => e.ticker));
+    const { data: existingRows } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('user_id', OWNER_ID).eq('fund_code', fundCode);
+    const existing = existingRows ?? [];
+    const protectedTickers = new Set(existing.filter((e) => ['manual', 'kap-pdf', 'calibration'].includes(e.source)).map((e) => e.ticker));
     const autoRows = rows.filter((r) => !protectedTickers.has(r.ticker));
     skippedManual += protectedTickers.size;
 
     // Eğer mevcutta kap-pdf varsa ve tarihi 45 günden yeniyse, bu fonu tamamen atla (KAP ana kaynak)
-    const hasRecentKapPdf = (existing ?? []).some((e) => {
+    const hasRecentKapPdf = existing.some((e) => {
       if (e.source !== 'kap-pdf' && e.source !== 'manual') return false;
       if (!e.as_of_date) return false;
       const asOf = new Date(e.as_of_date);
@@ -128,22 +148,23 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // 2) Upsert (fund_code + ticker anahtarı)
+    // 2) Upsert — tekil anahtar artık BİLEŞİK: (user_id, fund_code, ticker)
     if (autoRows.length > 0) {
       const { error } = await supabase
         .from('fund_holdings')
-        .upsert(autoRows, { onConflict: 'fund_code,ticker' });
+        .upsert(autoRows.map((r) => ({ ...r, user_id: OWNER_ID })), { onConflict: 'user_id,fund_code,ticker' });
       if (error) throw new Error(`[${fundCode}] upsert hatası: ${error.message}`);
       inserted += autoRows.length;
     }
 
     // 3) Rapor ortadan kalkan otomatik satırları sil (manuel ve kap-pdf dokunulmaz)
     const keepSet = new Set(tickers);
-    const stale = (existing ?? []).filter((e) => !['manual', 'kap-pdf', 'calibration'].includes(e.source) && !keepSet.has(e.ticker));
+    const stale = existing.filter((e) => !['manual', 'kap-pdf', 'calibration'].includes(e.source) && !keepSet.has(e.ticker));
     if (stale.length > 0) {
       const { error } = await supabase
         .from('fund_holdings')
         .delete()
+        .eq('user_id', OWNER_ID)   // service_role RLS'i atlar → sahibi elle daralt
         .eq('fund_code', fundCode)
         .in('ticker', stale.map((s) => s.ticker));
       if (error) throw new Error(`[${fundCode}] stale silme hatası: ${error.message}`);

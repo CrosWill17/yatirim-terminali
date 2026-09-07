@@ -4,6 +4,21 @@
 -- Kurulum: Supabase SQL Editor'da bir kez çalıştırın
 -- =============================================================================
 
+
+-- ==============================================================================
+-- YENIDEN CALISTIRMA KILIDI
+--
+-- supabase/supabase_rls_user_isolation.sql bir kez uygulandiysa bu dosyayi
+-- TEKRAR CALISTIRMAYIN. Bu dosya zayif `auth.uid() IS NOT NULL` politikalarini
+-- yeniden olusturur ve PostgreSQL izin verici (permissive) politikolari OR ile
+-- birlestirdigi icin o zayif politika geri geldiginde `auth.uid() = user_id`
+-- yalitimi SESSIZCE coker. Asagidaki kilit bunu imkansiz kilar.
+--
+-- NOT: Bu blok TEK SATIR ve tek `$$` cifti olarak yazildi. Cok satirli DO
+-- bloklari ve satirlara bolunmus RAISE metinleri bazi SQL istemcilerinde
+-- yanlis bolunup "syntax error at or near" hatasi verebiliyor.
+-- ==============================================================================
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'portfolio_positions' AND column_name = 'user_id') THEN RAISE EXCEPTION 'DURDURULDU: supabase_rls_user_isolation.sql zaten uygulanmis (portfolio_positions.user_id mevcut). Bu dosyayi tekrar calistirmak zayif "auth.uid() IS NOT NULL" politikalarini geri getirip kullanici yalitimini SESSIZCE cokertirdi. Bu dosyayi atlayin.'; END IF; END $$;
 CREATE TABLE IF NOT EXISTS fund_holding_proposals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   fund_code VARCHAR(10) NOT NULL,
