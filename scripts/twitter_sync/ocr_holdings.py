@@ -53,6 +53,23 @@ except ImportError:
 
 TWEETS_JSON = os.environ.get("TWEETS_JSON", "data/tweets.json")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
+# RLS (auth.uid() = user_id) altında satırların sahibine görünür olması için
+# yazılan satırlara user_id eklenir. Öncelik env; yoksa tek kullanıcı otomatik çözülür.
+USER_ID = os.environ.get("SUPABASE_USER_ID", "").strip()
+
+
+def resolve_user_id(sb) -> str:
+    """SUPABASE_USER_ID yoksa tek kullanıcıyı auth.admin üzerinden çözer; bulamazsa boş."""
+    if USER_ID:
+        return USER_ID
+    try:
+        res = sb.auth.admin.list_users()
+        users = getattr(res, "users", None) or []
+        if len(users) == 1:
+            return str(users[0].id)
+    except Exception:
+        pass
+    return ""
 
 # Türkçe ayları ve fon kodları
 KNOWN_FUNDS = ["TLY", "DFI", "KGM", "TP2", "THF", "GUM", "YZG", "MJG", "DMG", "GMC", "AK2", "ABG", "BAC", "LIDER", "IEYHO", "ISKPL"]
@@ -184,6 +201,15 @@ def main():
     sb = None
     if not DRY_RUN and SUPA_AVAILABLE and supa_url and supa_key:
         sb = create_client(supa_url, supa_key)
+        global USER_ID
+        USER_ID = resolve_user_id(sb)
+        if not USER_ID:
+            print(
+                "HATA: SUPABASE_USER_ID çözülemedi — tek kullanıcı bulunamadı. "
+                "Çok kullanıcılı kurulumda SUPABASE_USER_ID secret zorunludur.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     total_proposals = []
     for t in tweets:
@@ -231,6 +257,7 @@ def main():
                 if h["weight_pct"] < 0.01:
                     continue
                 total_proposals.append({
+                    "user_id": USER_ID,
                     "fund_code": fund_code,
                     "ticker": h["ticker"],
                     "weight_pct": h["weight_pct"],
@@ -257,7 +284,7 @@ def main():
         if total_proposals:
             # Upsert pending proposals
             try:
-                res = sb.table("fund_holding_proposals").upsert(total_proposals, on_conflict="fund_code,ticker,source_tweet_id").execute()
+                res = sb.table("fund_holding_proposals").upsert(total_proposals, on_conflict="user_id,fund_code,ticker,source_tweet_id").execute()
                 # Supabase-py hata fırlatmaz, data/error döner — basit kontrol
                 if hasattr(res, 'data'):
                     print(f"ÖZET: {len(tweets)} tweet → {len(total_proposals)} öneri yazıldı (fund_holding_proposals)")

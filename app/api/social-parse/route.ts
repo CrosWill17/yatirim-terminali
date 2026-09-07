@@ -15,13 +15,13 @@ export async function POST(req: Request) {
     }
 
     const parsed = parseSocialTweet(text);
-    const predictorHandle =
-      handle || parsed.predictorHandle || (parsed.fundCode ? '@sevketozhan' : '@sevketozhan');
+    const predictorHandle = handle || parsed.predictorHandle || '@sevketozhan';
 
     return NextResponse.json({
       success: true,
       parsed: {
-        fundCode: parsed.fundCode ?? 'BILINMEYEN',
+        // null = fon kodu çözülemedi → istemci kaydetmez (DB'ye "BILINMEYEN" yazılmaz)
+        fundCode: parsed.fundCode,
         // null = sayı çözülemedi (VERİ EKSİK) — uydurma 0 yazılmaz
         predictedReturnPct: parsed.value,
         hasPercentSign: parsed.hasPercentSign,

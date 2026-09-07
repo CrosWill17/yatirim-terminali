@@ -6,9 +6,14 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholde
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export const isSupabaseConfigured = () => {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   return (
-    process.env.NEXT_PUBLIC_SUPABASE_URL !== undefined &&
-    process.env.NEXT_PUBLIC_SUPABASE_URL !== '' &&
-    !process.env.NEXT_PUBLIC_SUPABASE_URL.includes('placeholder')
+    url !== undefined &&
+    url !== '' &&
+    !url.includes('placeholder') &&
+    key !== undefined &&
+    key !== '' &&
+    !key.includes('placeholder')
   );
 };

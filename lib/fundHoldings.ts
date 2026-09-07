@@ -114,7 +114,7 @@ function parseNum(s: string | null | undefined): number | null {
 
 /** "Temmuz 2026" → "2026-07-31" (dönem sonu). Çözülemezse null. */
 export function monthEndOfLabel(label: string): string | null {
-  const m = label.toLowerCase().match(/(ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|temmuz|ağustos|agustos|eylül|eylul|ekim|kasım|kasim|aralık|aralık|aralik)\s+(\d{4})/);
+  const m = label.toLowerCase().match(/(ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|temmuz|ağustos|agustos|eylül|eylul|ekim|kasım|kasim|aralık|aralik)\s+(\d{4})/);
   if (!m) return null;
   const month = TR_MONTHS[m[1].replace(/ı/g, 'i')] ?? null;
   const year = parseInt(m[2], 10);

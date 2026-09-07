@@ -46,7 +46,8 @@ interface PredictionRow {
   prediction_category: string;
   raw_text: string;
   prediction_date: string;
-  status: 'BEKLIYOR' | 'VERI_EKSİK';
+  status: 'BEKLIYOR' | 'VERI_EKSİK' | 'GECERSIZ';
+  actual_return_pct?: number | null;
 }
 
 interface VerifyOp {
@@ -55,12 +56,41 @@ interface VerifyOp {
   acc: number;
 }
 
+interface FormatB {
+  fund: string;
+  date: string;
+  actual: number;
+  sourceTweetId: string;
+  handle: string;
+  category: string;
+  rawText: string;
+}
+
 /** 'Wed Aug 25 18:10:00 +0000 2026' veya ISO → YYYY-MM-DD (çözülemezse null). */
 function toIsoDate(s: string | undefined): string | null {
   if (!s) return null;
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * RLS (auth.uid() = user_id) altında yazılan satırların sahibine görünür olması
+ * için script'in hangi kullanıcıya yazdığı bilinmelidir.
+ * Öncelik SUPABASE_USER_ID env'dedir; yoksa tek kullanıcılı kurulumda auth.admin
+ * üzerinden otomatik çözülür. Çok kullanıcılıysa env zorunludur.
+ */
+async function resolveUserId(sb: SupabaseClient): Promise<string | null> {
+  const envId = process.env.SUPABASE_USER_ID?.trim();
+  if (envId) return envId;
+  try {
+    const { data, error } = await sb.auth.admin.listUsers({ page: 1, perPage: 2 });
+    if (error || !data?.users?.length) return null;
+    if (data.users.length > 1) return null; // çok kullanıcı → SUPABASE_USER_ID zorunlu
+    return data.users[0].id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function main(): Promise<void> {
@@ -88,12 +118,21 @@ async function main(): Promise<void> {
     auth: { persistSession: false },
   });
 
+  let USER_ID = process.env.SUPABASE_USER_ID?.trim() ?? '';
+  if (!DRY_RUN && sb && !USER_ID) {
+    USER_ID = (await resolveUserId(sb)) ?? '';
+    if (!USER_ID) {
+      console.error('HATA: SUPABASE_USER_ID çözülemedi — tek kullanıcı bulunamadı. Çok kullanıcılı kurulumda SUPABASE_USER_ID secret zorunludur.');
+      process.exit(1);
+    }
+  }
+
   const DEFAULT_HANDLE = '@sevketozhan';
   let skipped = 0;
 
   // ---------------- 1) PARSE (saf, DB'siz) ----------------
   const inserts: PredictionRow[] = [];
-  const bCandidates: { fund: string; date: string; actual: number; sourceTweetId: string }[] = [];
+  const bCandidates: FormatB[] = [];
   const tweetSourceIds: string[] = [];
 
   for (const t of tweets) {
@@ -138,7 +177,7 @@ async function main(): Promise<void> {
       if (!p.hasPercentSign) {
         inserts.push({ ...base, predicted_return_pct: p.value, prediction_date: date, status: 'BEKLIYOR' });
       } else {
-        bCandidates.push({ fund: p.fundCode, date, actual: p.value, sourceTweetId });
+        bCandidates.push({ fund: p.fundCode, date, actual: p.value, sourceTweetId, handle: base.predictor_handle, category: base.prediction_category, rawText: t.text });
       }
       continue;
     }
@@ -164,7 +203,7 @@ async function main(): Promise<void> {
           status: 'BEKLIYOR',
         });
       } else {
-        bCandidates.push({ fund: a.fundCode, date, actual: a.value!, sourceTweetId });
+        bCandidates.push({ fund: a.fundCode, date, actual: a.value!, sourceTweetId, handle: baseHandle, category: baseCat, rawText: t.text });
       }
     }
   }
@@ -177,6 +216,7 @@ async function main(): Promise<void> {
     const { data: existing, error: e1 } = await sb
       .from(TABLO)
       .select('source_tweet_id')
+      .eq('user_id', USER_ID)
       .in('source_tweet_id', tweetSourceIds);
     if (e1) { console.error('HATA (mevcut id sorgusu):', e1.message); process.exit(1); }
     (existing ?? []).forEach((r: any) => r.source_tweet_id && existingIds.add(r.source_tweet_id));
@@ -187,6 +227,7 @@ async function main(): Promise<void> {
       const { data: openRows, error: e2 } = await sb
         .from(TABLO)
         .select('source_tweet_id, fund_code, prediction_date, predicted_return_pct')
+        .eq('user_id', USER_ID)
         .eq('status', 'BEKLIYOR')
         .is('actual_return_pct', null)
         .in('fund_code', funds)
@@ -223,18 +264,18 @@ async function main(): Promise<void> {
         acc: calculateAccuracyScore(target.predPct, b.actual),
       });
     } else {
-      // Eşleşme yok / çoklu → uydurma yok: ham veri satırı
-      const tweet = tweets.find((t) => `tw-${t.id}` === b.sourceTweetId);
-      const p = parseSocialTweet(tweet?.text ?? '');
+      // Eşleşme yok / çoklu → uydurma yok: "gerçekleşen" değeri "tahmin" gibi
+      // YAZILMAZ. Ham satır GECERSIZ işaretlenir; actual_return_pct ayrı tutulur.
       inserts.push({
         source_tweet_id: b.sourceTweetId,
-        predictor_handle: p.predictorHandle ?? DEFAULT_HANDLE,
+        predictor_handle: b.handle || DEFAULT_HANDLE,
         fund_code: b.fund,
-        prediction_category: p.category,
-        raw_text: tweet?.text ?? '',
-        predicted_return_pct: b.actual,
+        prediction_category: b.category,
+        raw_text: b.rawText,
+        predicted_return_pct: null,
         prediction_date: b.date,
-        status: 'BEKLIYOR',
+        status: 'GECERSIZ',
+        actual_return_pct: b.actual,
       });
     }
   }
@@ -250,13 +291,14 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(verifyOps, null, 2));
   } else if (sb) {
     if (fresh.length > 0) {
-      const { error: e3 } = await sb.from(TABLO).insert(fresh);
+      const { error: e3 } = await sb.from(TABLO).insert(fresh.map((r) => ({ ...r, user_id: USER_ID })));
       if (e3) { console.error('HATA (insert):', e3.message); process.exit(1); }
     }
     for (const v of verifyOps) {
       const { error: e4 } = await sb
         .from(TABLO)
         .update({ actual_return_pct: v.actual, accuracy_score: v.acc, status: 'DOGRULANDI' })
+        .eq('user_id', USER_ID)
         .eq('source_tweet_id', v.source_tweet_id);
       if (e4) { console.error('HATA (update):', e4.message); process.exit(1); }
     }

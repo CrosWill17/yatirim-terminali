@@ -23,7 +23,8 @@ import { ALL_FUND_CODES, TEFAS_FON_CODES, isFundCode, isPpfCode, shouldAutoResea
 import {
   loadAll, upsertPosition, upsertDecision, insertTransaction,
   insertCashMovement, insertPrediction, updatePrediction,
-  setInitialCapital, saveDailySnapshot, upsertFundHolding, upsertFundHoldingKapPdf, upsertFundHoldingAuto, deleteFundHolding,
+  setInitialCapital, setTrustScore as persistTrustScore, saveDailySnapshot,
+  upsertFundHolding, upsertFundHoldingKapPdf, upsertFundHoldingAuto, deleteFundHolding,
   approveProposal, rejectProposal,
 } from '@/lib/repo';
 import type { FundHoldingProposal } from '@/lib/repo';
@@ -213,7 +214,9 @@ export default function Home() {
     if (missing.length === 0) return;
     let cancelled = false;
     // Fon + hisse karışık — /api/market/quotes artık fonaly + Yahoo deniyor
-    fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`)
+    fetch(`/api/market/quotes?symbols=${encodeURIComponent(missing.join(','))}`, {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d?.quotes) {
@@ -256,7 +259,7 @@ export default function Home() {
         missing.forEach((c) => { failedQuotesRef.current[c] = now; });
       });
     return () => { cancelled = true; };
-  }, [positions, market.positions, configured, isGuest]);
+  }, [positions, market.positions, configured, isGuest, accessToken]);
 
   /* ------------------- Yazma takibi (P0) -------------------------- */
   const pendingRef = useRef(0);
@@ -375,6 +378,7 @@ export default function Home() {
       setProposals((bundle as any).proposals ?? []);
       setCashBalance(bundle.cashBalance ?? 0);
       setInitialCapitalState(bundle.initialCapital ?? 0);
+      if (bundle.trustScore != null) setTrustScore(bundle.trustScore);
       setDbState('connected');
       setDbError(null);
     })();
@@ -386,7 +390,9 @@ export default function Home() {
     if (isGuest || fundHoldings.length === 0) { setHoldingPrices({}); return; }
     const codes = Array.from(new Set(fundHoldings.map((h) => h.ticker)));
     let cancelled = false;
-    fetch(`/api/market/quotes?symbols=${encodeURIComponent(codes.join(','))}`)
+    fetch(`/api/market/quotes?symbols=${encodeURIComponent(codes.join(','))}`, {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d?.quotes) return;
@@ -401,7 +407,7 @@ export default function Home() {
       })
       .catch(() => { /* fiyatı eksik hisse → katkı 0 (VERİ EKSİK) */ });
     return () => { cancelled = true; };
-  }, [fundHoldings, isGuest]);
+  }, [fundHoldings, isGuest, accessToken]);
 
   /* --------- Yeni fonlar için içerik otomatik araştırma (P3 genişletme) -------- */
   const researchingRef = React.useRef<Set<string>>(new Set());
@@ -759,10 +765,11 @@ export default function Home() {
         body: JSON.stringify({ text: tweetInput }),
       });
       const data = await res.json();
-      if (data.success && data.parsed) {
+      // Kod çözülemediyse (fundCode null) DB'ye "BILINMEYEN" yazılmaz.
+      if (data.success && data.parsed && typeof data.parsed.fundCode === 'string') {
         const p = data.parsed;
         const newPred: SocialPrediction = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(), // DB ile aynı id — doğrulama kesin eşleşir
           predictor_handle: p.predictorHandle,
           fund_code: p.fundCode,
           predicted_return_pct: p.predictedReturnPct,
@@ -775,6 +782,7 @@ export default function Home() {
         await track('Tahmin kaydı', insertPrediction(newPred));
         setTweetInput('');
       } else {
+        // Ayrıştırılamadı veya fon kodu yok — kaydedilmez.
         setTweetInput('');
       }
     } catch {
@@ -796,6 +804,8 @@ export default function Home() {
     setPredictions((prev) => prev.map((p) => (p.id === verifyId ? updated : p)));
     setTrustScore(newTrust);
     await track('Tahmin doğrulama', updatePrediction(updated));
+    // Güven skoru kalıcı: app_settings.trust_score (kullanıcı başına)
+    await track('Güven skoru', persistTrustScore(newTrust));
     setVerifyId(null);
     setVerifyPct('');
   };
@@ -846,9 +856,9 @@ export default function Home() {
     });
   };
 
-  const handleDeleteHolding = async (id: string) => {
-    const ok = await track('Fon içeriği silme', deleteFundHolding(id));
-    if (ok) setFundHoldings((prev) => prev.filter((r) => r.id !== id));
+  const handleDeleteHolding = async (fundCode: string, ticker: string) => {
+    const ok = await track('Fon içeriği silme', deleteFundHolding(fundCode, ticker));
+    if (ok) setFundHoldings((prev) => prev.filter((r) => !(r.fund_code === fundCode && r.ticker === ticker)));
   };
 
   const handleApproveProposal = async (p: FundHoldingProposal) => {

@@ -30,7 +30,7 @@ interface Props {
   canWrite: boolean;
   onUpsert: (draft: FundHoldingDraft) => Promise<void>;
   onUpsertKapPdf?: (draft: FundHoldingDraft) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
+  onDelete: (fundCode: string, ticker: string) => Promise<void>;
   onApproveProposal?: (p: FundHoldingProposal) => Promise<void>;
   onRejectProposal?: (id: string) => Promise<void>;
 }
@@ -135,7 +135,7 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
     if (!code || !ticker) { setFormError('Fon kodu ve hisse kodu zorunlu.'); return; }
     if (!/^[A-Z0-9]{2,10}$/.test(ticker)) { setFormError('Hisse kodu 2-10 karakter (A-Z, 0-9) olmalı.'); return; }
     if (!Number.isFinite(weight) || weight <= 0 || weight > 100) { setFormError('Ağırlık 0-100 arasında bir sayı olmalı.'); return; }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(form.as_of_date)) { setFormError('Rapor dönemi GG.AA.YYYY biçiminde olmalı (YYYY-AA-GG).'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(form.as_of_date)) { setFormError('Rapor dönemi YYYY-AA-GG biçiminde olmalı (ör. 2026-07-31).'); return; }
 
     setBusy(true);
     setFormError('');
@@ -459,7 +459,7 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
                             <button
-                              onClick={() => onDelete(r.id)}
+                              onClick={() => onDelete(r.fund_code, r.ticker)}
                               disabled={!canWrite}
                               title="Sil"
                               className="text-slate-400 hover:text-rose-300 disabled:opacity-40"

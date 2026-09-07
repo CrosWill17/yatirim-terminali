@@ -14,7 +14,7 @@
  *     (SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY DRY_RUN'da GEREKLİ DEĞİL)
  */
 import { readFileSync } from 'node:fs';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   FUND_SOURCES,
   parseFintablesHoldings,
@@ -32,6 +32,25 @@ const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 if (!DRY_RUN && (!SUPABASE_URL || !SERVICE_KEY)) {
   console.error('HATA: SUPABASE_URL ve SUPABASE_SERVICE_ROLE_KEY gerekli (ya da DRY_RUN=1 ile çalıştır).');
   process.exit(1);
+}
+
+/**
+ * RLS (auth.uid() = user_id) altında yazılan satırların sahibine görünür olması
+ * için script'in hangi kullanıcıya yazdığı bilinmelidir.
+ * Öncelik SUPABASE_USER_ID env'dedir; yoksa tek kullanıcılı kurulumda auth.admin
+ * üzerinden otomatik çözülür. Çok kullanıcılıysa env zorunludur.
+ */
+async function resolveUserId(sb: SupabaseClient): Promise<string | null> {
+  const envId = process.env.SUPABASE_USER_ID?.trim();
+  if (envId) return envId;
+  try {
+    const { data, error } = await sb.auth.admin.listUsers({ page: 1, perPage: 2 });
+    if (error || !data?.users?.length) return null;
+    if (data.users.length > 1) return null; // çok kullanıcı → SUPABASE_USER_ID zorunlu
+    return data.users[0].id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
@@ -100,6 +119,12 @@ async function main(): Promise<void> {
 
   const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
+  const USER_ID = await resolveUserId(supabase);
+  if (!USER_ID) {
+    console.error('HATA: SUPABASE_USER_ID çözülemedi — tek kullanıcı bulunamadı. Çok kullanıcılı kurulumda SUPABASE_USER_ID secret zorunludur.');
+    process.exit(1);
+  }
+
   let inserted = 0;
   let deleted = 0;
   let skippedManual = 0;
@@ -109,7 +134,7 @@ async function main(): Promise<void> {
 
     // 1) Manuel ve KAP PDF override'ları koru: source='manual' ve 'kap-pdf' ASLA ezilmez (ham veri, onay gerektirmez)
     //    KAP PDF ana veri kaynağıdır (kullanıcı şartı)
-    const { data: existing } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('fund_code', fundCode);
+    const { data: existing } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('user_id', USER_ID).eq('fund_code', fundCode);
     const protectedTickers = new Set((existing ?? []).filter((e) => ['manual', 'kap-pdf', 'calibration'].includes(e.source)).map((e) => e.ticker));
     const autoRows = rows.filter((r) => !protectedTickers.has(r.ticker));
     skippedManual += protectedTickers.size;
@@ -128,11 +153,11 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // 2) Upsert (fund_code + ticker anahtarı)
+    // 2) Upsert (user_id + fund_code + ticker anahtarı)
     if (autoRows.length > 0) {
       const { error } = await supabase
         .from('fund_holdings')
-        .upsert(autoRows, { onConflict: 'fund_code,ticker' });
+        .upsert(autoRows.map((r) => ({ ...r, user_id: USER_ID })), { onConflict: 'user_id,fund_code,ticker' });
       if (error) throw new Error(`[${fundCode}] upsert hatası: ${error.message}`);
       inserted += autoRows.length;
     }
@@ -144,6 +169,7 @@ async function main(): Promise<void> {
       const { error } = await supabase
         .from('fund_holdings')
         .delete()
+        .eq('user_id', USER_ID)
         .eq('fund_code', fundCode)
         .in('ticker', stale.map((s) => s.ticker));
       if (error) throw new Error(`[${fundCode}] stale silme hatası: ${error.message}`);

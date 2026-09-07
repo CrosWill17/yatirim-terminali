@@ -23,6 +23,16 @@ function enabled(): boolean {
   return isSupabaseConfigured();
 }
 
+/** Aktif oturumdaki kullanıcının Supabase user id'si (RLS user_id yazmaları için). */
+async function currentUserId(): Promise<string | null> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.user?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Hata yardımcıları                                                   */
 /* ------------------------------------------------------------------ */
@@ -64,10 +74,12 @@ interface SupabaseResult {
 /**
  * Tek yazma deseni: `error` alanı kontrol edilir, hata varsa console.warn +
  * { ok:false, error } döner. Başarılıysa { ok:true }.
+ * `fn` çağrısına oturumdaki `user_id` geçirilir — tüm yazmalar RLS
+ * (auth.uid() = user_id) kuralına uygun şekilde user_id taşır.
  */
 async function write(
   operation: string,
-  fn: () => PromiseLike<SupabaseResult>
+  fn: (userId: string) => PromiseLike<SupabaseResult>
 ): Promise<WriteResult> {
   if (!enabled()) {
     const e = setupError(operation);
@@ -75,7 +87,16 @@ async function write(
     return { ok: false, error: e };
   }
   try {
-    const { error } = await fn();
+    const userId = await currentUserId();
+    if (!userId) {
+      const e = classifySupabaseError(operation, {
+        message: 'Oturum yok — user_id çözülemedi (giriş yapılmalı)',
+        status: 401,
+      });
+      warn(operation, e);
+      return { ok: false, error: e };
+    }
+    const { error } = await fn(userId);
     if (error) {
       const e = classifySupabaseError(operation, error);
       warn(operation, e);
@@ -105,6 +126,8 @@ export interface DbBundle {
   proposals: FundHoldingProposal[];
   cashBalance: number | null;
   initialCapital: number | null;
+  /** Güven skoru (yoksa null — UI varsayılan 78.5 kullanır). */
+  trustScore: number | null;
 }
 
 export type LoadResult =
@@ -127,7 +150,7 @@ export async function loadAll(): Promise<LoadResult> {
       supabase.from('fund_holdings').select('*').order('fund_code').order('weight_pct', { ascending: false }),
       supabase.from('fund_holding_proposals').select('*').eq('status', 'pending').order('detected_at', { ascending: false }),
       supabase.from('cash_ledger').select('balance_after').order('created_at', { ascending: false }).limit(1),
-      supabase.from('app_settings').select('key, value').eq('key', 'initial_capital'),
+      supabase.from('app_settings').select('key, value'),
     ]);
 
     // ÇEKİRDEK tablolar: hata varsa yükleme BAŞARISIZ sayılır (sessiz devam yok).
@@ -248,12 +271,28 @@ export async function loadAll(): Promise<LoadResult> {
       status: r.status ?? 'BEKLIYOR',
     }));
 
+    // P0: kasa bakiyesi ve app_settings okuma hataları da SESSİZ yutulmaz.
+    if (balRes.error) {
+      console.warn(`[repo] cash_ledger bakiyesi okunamadı: ${balRes.error.message} — cashBalance null varsayılır.`);
+    }
+    if (setRes.error) {
+      console.warn(`[repo] app_settings okunamadı: ${setRes.error.message} — initial_capital/trust_score null varsayılır.`);
+    }
+
     const cashBalance = balRes.data?.[0] != null ? Number((balRes.data as any[])[0].balance_after) : null;
-    const initialCapital = setRes.data?.[0] != null ? Number((setRes.data as any[])[0].value) : null;
+    const settings = (setRes.data as any[]) ?? [];
+    const getSetting = (key: string): number | null => {
+      const row = settings.find((s) => s.key === key);
+      if (row == null || row.value == null) return null;
+      const n = Number(row.value);
+      return Number.isFinite(n) ? n : null;
+    };
+    const initialCapital = getSetting('initial_capital');
+    const trustScore = getSetting('trust_score');
 
     return {
       ok: true,
-      bundle: { positions, decisions, transactions, cashMovements, predictions, fundHoldings, proposals, cashBalance, initialCapital },
+      bundle: { positions, decisions, transactions, cashMovements, predictions, fundHoldings, proposals, cashBalance, initialCapital, trustScore },
     };
   } catch (err) {
     const error = classifySupabaseError('loadAll', {
@@ -269,9 +308,10 @@ export async function loadAll(): Promise<LoadResult> {
 /* ------------------------------------------------------------------ */
 
 export function upsertPosition(p: Position): Promise<WriteResult> {
-  return write('upsertPosition', () =>
+  return write('upsertPosition', (userId) =>
     supabase.from('portfolio_positions').upsert(
       {
+        user_id: userId,
         symbol: p.symbol,
         asset_name: p.asset_name,
         asset_type: p.asset_type,
@@ -283,15 +323,16 @@ export function upsertPosition(p: Position): Promise<WriteResult> {
         current_action: p.current_action,
         rationale: p.rationale,
       },
-      { onConflict: 'symbol' }
+      { onConflict: 'user_id,symbol' }
     )
   );
 }
 
 export function upsertDecision(d: Decision): Promise<WriteResult> {
-  return write('upsertDecision', () =>
+  return write('upsertDecision', (userId) =>
     supabase.from('execution_decisions').upsert(
       {
+        user_id: userId,
         id: d.id,
         symbol: d.symbol,
         action_type: d.action_type,
@@ -302,14 +343,15 @@ export function upsertDecision(d: Decision): Promise<WriteResult> {
         details: d.details,
         created_at: d.created_at,
       },
-      { onConflict: 'id' }
+      { onConflict: 'user_id,id' }
     )
   );
 }
 
 export function insertTransaction(t: Transaction): Promise<WriteResult> {
-  return write('insertTransaction', () =>
+  return write('insertTransaction', (userId) =>
     supabase.from('transactions').insert({
+      user_id: userId,
       symbol: t.symbol,
       transaction_type: t.transaction_type,
       quantity: t.quantity,
@@ -325,8 +367,9 @@ export function insertTransaction(t: Transaction): Promise<WriteResult> {
 }
 
 export function insertCashMovement(m: CashMovement): Promise<WriteResult> {
-  return write('insertCashMovement', () =>
+  return write('insertCashMovement', (userId) =>
     supabase.from('cash_ledger').insert({
+      user_id: userId,
       movement_type: m.movement_type,
       amount: m.amount,
       balance_after: m.balance_after,
@@ -337,8 +380,10 @@ export function insertCashMovement(m: CashMovement): Promise<WriteResult> {
 }
 
 export function insertPrediction(p: SocialPrediction): Promise<WriteResult> {
-  return write('insertPrediction', () =>
+  return write('insertPrediction', (userId) =>
     supabase.from('social_predictions').insert({
+      id: p.id, // UUID — doğrulama (updatePrediction) aynı id ile kesin eşleşir
+      user_id: userId,
       predictor_handle: p.predictor_handle,
       fund_code: p.fund_code,
       predicted_return_pct: p.predicted_return_pct,
@@ -353,23 +398,33 @@ export function insertPrediction(p: SocialPrediction): Promise<WriteResult> {
 }
 
 export function updatePrediction(p: SocialPrediction): Promise<WriteResult> {
-  // local id uuid değilse (Date.now tabanlı) symbol+tarih+metin ile yakala
-  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const patch = {
     actual_return_pct: p.actual_return_pct ?? null,
     accuracy_score: p.accuracy_score ?? null,
     status: p.status,
   };
-  return write('updatePrediction', () =>
-    uuidRe.test(p.id)
-      ? supabase.from('social_predictions').update(patch).eq('id', p.id)
-      : supabase.from('social_predictions').update(patch).eq('raw_text', p.raw_text).eq('fund_code', p.fund_code)
+  // p.id artık gerçek UUID (crypto.randomUUID) — toplu güncelleme riski yok.
+  return write('updatePrediction', (userId) =>
+    supabase.from('social_predictions').update(patch).eq('id', p.id).eq('user_id', userId)
   );
 }
 
 export function setInitialCapital(value: number): Promise<WriteResult> {
-  return write('setInitialCapital', () =>
-    supabase.from('app_settings').upsert({ key: 'initial_capital', value: String(value) })
+  return write('setInitialCapital', (userId) =>
+    supabase.from('app_settings').upsert(
+      { user_id: userId, key: 'initial_capital', value: String(value) },
+      { onConflict: 'user_id,key' }
+    )
+  );
+}
+
+/** Güven skoru kalıcılığı (kullanıcı başına). */
+export function setTrustScore(value: number): Promise<WriteResult> {
+  return write('setTrustScore', (userId) =>
+    supabase.from('app_settings').upsert(
+      { user_id: userId, key: 'trust_score', value: String(value) },
+      { onConflict: 'user_id,key' }
+    )
   );
 }
 
@@ -379,10 +434,10 @@ export function saveDailySnapshot(
   cashBalance: number,
   breakdown: Record<string, number>
 ): Promise<WriteResult> {
-  return write('saveDailySnapshot', () =>
+  return write('saveDailySnapshot', (userId) =>
     supabase.from('portfolio_snapshots').upsert(
-      { snapshot_date: date, total_value: totalValue, cash_balance: cashBalance, breakdown },
-      { onConflict: 'snapshot_date' }
+      { user_id: userId, snapshot_date: date, total_value: totalValue, cash_balance: cashBalance, breakdown },
+      { onConflict: 'user_id,snapshot_date' }
     )
   );
 }
@@ -400,9 +455,10 @@ export interface FundHoldingDraft {
 
 /** Manuel override: source='manual' — otomatik sync job'u bu satırı asla ezmez. */
 export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
-  return write('upsertFundHolding', () =>
+  return write('upsertFundHolding', (userId) =>
     supabase.from('fund_holdings').upsert(
       {
+        user_id: userId,
         fund_code: h.fund_code,
         ticker: h.ticker,
         company_name: h.company_name ?? null,
@@ -411,16 +467,17 @@ export function upsertFundHolding(h: FundHoldingDraft): Promise<WriteResult> {
         source: 'manual',
         notes: h.notes ?? 'manuel override (UI)',
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
 
 /** KAP PDF — ana veri kaynağı (ham veri, onay gerektirmez, sync ezmez) */
 export function upsertFundHoldingKapPdf(h: FundHoldingDraft): Promise<WriteResult> {
-  return write('upsertFundHoldingKapPdf', () =>
+  return write('upsertFundHoldingKapPdf', (userId) =>
     supabase.from('fund_holdings').upsert(
       {
+        user_id: userId,
         fund_code: h.fund_code,
         ticker: h.ticker,
         company_name: h.company_name ?? null,
@@ -429,16 +486,17 @@ export function upsertFundHoldingKapPdf(h: FundHoldingDraft): Promise<WriteResul
         source: 'kap-pdf',
         notes: h.notes ?? 'KAP PDF (ana kaynak, ham veri)',
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
 
 /** Otomatik araştırma: source='auto' — sync job'u ezebilir, manuel/kap-pdf değil. */
 export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 'fintables' | 'rotaborsa' | 'kap-pdf' }): Promise<WriteResult> {
-  return write('upsertFundHoldingAuto', () =>
+  return write('upsertFundHoldingAuto', (userId) =>
     supabase.from('fund_holdings').upsert(
       {
+        user_id: userId,
         fund_code: h.fund_code,
         ticker: h.ticker,
         company_name: h.company_name ?? null,
@@ -447,14 +505,19 @@ export function upsertFundHoldingAuto(h: FundHoldingDraft & { source?: 'auto' | 
         source: (h as any).source ?? 'auto',
         notes: h.notes ?? 'otomatik araştırma (fintables/rotaborsa)',
       },
-      { onConflict: 'fund_code,ticker' }
+      { onConflict: 'user_id,fund_code,ticker' }
     )
   );
 }
 
-export function deleteFundHolding(id: string): Promise<WriteResult> {
-  return write('deleteFundHolding', () =>
-    supabase.from('fund_holdings').delete().eq('id', id)
+/**
+ * Fon içeriği satırı silme — (fund_code, ticker) anahtarıyla.
+ * UI'ın ürettiği yerel id'ler UUID olmadığı için `.eq('id')` kullanılmaz;
+ * tablo UNIQUE(user_id, fund_code, ticker) olduğundan bu eşleşme kesindir.
+ */
+export function deleteFundHolding(fundCode: string, ticker: string): Promise<WriteResult> {
+  return write('deleteFundHolding', (userId) =>
+    supabase.from('fund_holdings').delete().eq('user_id', userId).eq('fund_code', fundCode).eq('ticker', ticker)
   );
 }
 
@@ -496,14 +559,14 @@ export async function loadProposals(): Promise<FundHoldingProposal[]> {
 }
 
 export function approveProposal(id: string): Promise<WriteResult> {
-  return write('approveProposal', () =>
-    supabase.from('fund_holding_proposals').update({ status: 'approved' }).eq('id', id)
+  return write('approveProposal', (userId) =>
+    supabase.from('fund_holding_proposals').update({ status: 'approved' }).eq('id', id).eq('user_id', userId)
   );
 }
 
 export function rejectProposal(id: string): Promise<WriteResult> {
-  return write('rejectProposal', () =>
-    supabase.from('fund_holding_proposals').update({ status: 'rejected' }).eq('id', id)
+  return write('rejectProposal', (userId) =>
+    supabase.from('fund_holding_proposals').update({ status: 'rejected' }).eq('id', id).eq('user_id', userId)
   );
 }
 

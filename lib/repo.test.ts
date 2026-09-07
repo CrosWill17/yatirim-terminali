@@ -43,7 +43,9 @@ vi.mock('./supabase', () => {
   return {
     supabase: {
       from: (table: string) => makeBuilder(table),
-      auth: { getUser: async () => ({ data: { user: null }, error: null }) },
+      auth: {
+        getSession: async () => ({ data: { session: { user: { id: 'test-user-id' } } }, error: null }),
+      },
     },
     isSupabaseConfigured: () => mock.configured,
   };
@@ -99,7 +101,7 @@ describe('P0 — yazma fonksiyonları hatayı geri döndürür (sessiz yutma yok
     ['setInitialCapital', () => setInitialCapital(678000)],
     ['saveDailySnapshot', () => saveDailySnapshot('2026-08-28', 1000, 500, { NAKİT: 500 })],
     ['upsertFundHolding', () => upsertFundHolding({ fund_code: 'TLY', ticker: 'OZATD', weight_pct: 34.27, as_of_date: '2026-07-31' })],
-    ['deleteFundHolding', () => deleteFundHolding('11111111-1111-1111-1111-111111111111')],
+    ['deleteFundHolding', () => deleteFundHolding('TLY', 'OZATD')],
   ];
 
   it.each(cases)('%s başarılıysa { ok: true }', async (_name, fn) => {
@@ -223,13 +225,13 @@ describe('P0 — fon içeriği yazma hedefi yalnız fund_holdings', () => {
   });
 
   it('deleteFundHolding fund_holdings tablosundan siler', async () => {
-    await deleteFundHolding('x');
+    await deleteFundHolding('TLY', 'OZATD');
     expect(mock.calls).toContain('delete:fund_holdings');
   });
 });
 
 describe('P3 — manuel override kaynağı korunur', () => {
-  it("upsertFundHolding source='manual' yazar ve (fund_code,ticker) üzerinde çakışma çözer", async () => {
+  it("upsertFundHolding source='manual' yazar ve (user_id,fund_code,ticker) üzerinde çakışma çözer", async () => {
     await upsertFundHolding({
       fund_code: 'DFI', ticker: 'TUPRS', company_name: 'Türkiye Petrol Rafinerileri A.Ş.',
       weight_pct: 12.5, as_of_date: '2026-07-31', notes: 'elle girildi',
@@ -240,7 +242,8 @@ describe('P3 — manuel override kaynağı korunur', () => {
     expect(call!.payload.fund_code).toBe('DFI');
     expect(call!.payload.ticker).toBe('TUPRS');
     expect(call!.payload.weight_pct).toBeCloseTo(12.5, 4);
-    expect(call!.options).toEqual({ onConflict: 'fund_code,ticker' });
+    expect(call!.payload.user_id).toBe('test-user-id');
+    expect(call!.options).toEqual({ onConflict: 'user_id,fund_code,ticker' });
   });
 
   it('pozisyon yazması yalnız portfolio_positions tablosuna gider', async () => {

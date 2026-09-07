@@ -53,11 +53,16 @@ export async function POST(req: NextRequest) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // pdf-parse dynamic import (ESM uyumu için)
-    // @ts-ignore - no types
-    const pdfParse = (await import('pdf-parse')).default as any;
-    const data = await pdfParse(buffer);
-    const text: string = data.text || '';
+    // pdf-parse v2 (ESM) — PDFParse sınıfı; metin getText() ile alınır.
+    const { PDFParse } = (await import('pdf-parse')) as typeof import('pdf-parse');
+    const parser = new PDFParse({ data: new Uint8Array(buffer) });
+    let text = '';
+    try {
+      const result = await parser.getText();
+      text = result.text || '';
+    } finally {
+      await parser.destroy().catch(() => { /* işlemciyi serbest bırak */ });
+    }
 
     if (!text || text.trim().length < 100) {
       return NextResponse.json({ ok: false, error: 'PDF metni okunamadı (taranmış görüntü olabilir, OCR gerekli)' }, { status: 422 });

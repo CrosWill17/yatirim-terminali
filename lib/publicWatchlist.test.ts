@@ -78,7 +78,7 @@ describe('portföy sızıntısı yok', () => {
     expect(names).not.toContain('TERA PORTFÖY BİRİNCİ');
     expect(names).not.toContain('ATLAS PORTFÖY SERBEST');
     expect(names).not.toContain('MASFEN');
-    expect(names).not.toContain('SA-RARA');
+    expect(names).not.toContain('SA-RA');
     expect(names).not.toContain('EKİM TURİZM');
   });
 
