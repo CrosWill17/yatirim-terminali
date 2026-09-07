@@ -124,6 +124,25 @@ export interface FundHoldingRow {
 /* imkânsızdır.                                                       */
 /* ------------------------------------------------------------------ */
 
+/**
+ * fund_nav_daily satırı — gün sonu tahmin snapshot'ı + gerçekleşen.
+ * supabase_fund_nav_daily_migration.sql ile oluşur.
+ */
+export interface FundNavDailyRow {
+  id: string;
+  fund_code: string;
+  nav_date: string;              // YYYY-AA-GG
+  estimated_pct: number | null;  // 18:20 snapshot
+  covered_pct: number | null;
+  actual_pct: number | null;     // TEFAS'ın açıkladığı gerçek getiri (sonradan dolar)
+  actual_nav: number | null;
+  actual_at: string | null;
+  calib_factor: number;
+  status: 'estimated' | 'actual' | 'both' | string;
+  source: string;
+  notes: string | null;
+}
+
 export type RepoErrorKind = 'setup' | 'network' | 'rls' | 'not_found' | 'unknown';
 
 export interface RepoError {

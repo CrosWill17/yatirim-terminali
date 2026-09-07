@@ -26,7 +26,7 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import {
   Position, Decision, Transaction, CashMovement, SocialPrediction,
-  FundAssetType, FundHoldingRow, RepoError, RepoErrorKind, WriteResult,
+  FundAssetType, FundHoldingRow, FundNavDailyRow, RepoError, RepoErrorKind, WriteResult,
 } from './types';
 
 function enabled(): boolean {
@@ -543,3 +543,95 @@ export function rejectProposal(id: string): Promise<WriteResult> {
   );
 }
 
+/* --------------------- Gün sonu NAV: tahmin vs gerçekleşen ---------- */
+
+const navDailyFromRow = (r: any): FundNavDailyRow => ({
+  id: r.id,
+  fund_code: r.fund_code,
+  nav_date: String(r.nav_date ?? '').slice(0, 10),
+  estimated_pct: r.estimated_pct != null ? Number(r.estimated_pct) : null,
+  covered_pct: r.covered_pct != null ? Number(r.covered_pct) : null,
+  actual_pct: r.actual_pct != null ? Number(r.actual_pct) : null,
+  actual_nav: r.actual_nav != null ? Number(r.actual_nav) : null,
+  actual_at: r.actual_at ?? null,
+  calib_factor: r.calib_factor != null ? Number(r.calib_factor) : 1,
+  status: r.status ?? 'estimated',
+  source: r.source ?? 'app',
+  notes: r.notes ?? null,
+});
+
+/**
+ * Son `days` günlük geçmişi getirir (kalibrasyon bunu besler).
+ * Migration koşmadıysa sessizce boş döner — uygulama çökmez.
+ */
+export async function loadNavDaily(days = 90): Promise<FundNavDailyRow[]> {
+  if (!enabled()) return [];
+  try {
+    const since = new Date(Date.now() - days * 86400_000).toISOString().slice(0, 10);
+    const { data, error } = await supabase
+      .from('fund_nav_daily')
+      .select('*')
+      .gte('nav_date', since)
+      .order('nav_date', { ascending: false });
+    if (error || !data) return [];
+    return (data as any[]).map(navDailyFromRow);
+  } catch {
+    return [];
+  }
+}
+
+export interface NavDailyEstimateDraft {
+  fund_code: string;
+  nav_date: string;
+  estimated_pct: number;
+  covered_pct: number | null;
+  calib_factor?: number;
+  notes?: string | null;
+}
+
+/** 18:20 snapshot'ı yazar. Aynı gün tekrar koşmak tahmini GÜNCELLEMEZ
+ *  (ON CONFLICT'te estimated_pct korunmuyor → bilinçli: son yazan kazanır,
+ *  çünkü buton "şu anki tahmini sabitle" demek). */
+export function upsertNavDailyEstimate(d: NavDailyEstimateDraft): Promise<WriteResult> {
+  return write('upsertNavDailyEstimate', () =>
+    supabase.from('fund_nav_daily').upsert(
+      {
+        fund_code: d.fund_code,
+        nav_date: d.nav_date,
+        estimated_pct: d.estimated_pct,
+        covered_pct: d.covered_pct,
+        calib_factor: d.calib_factor ?? 1,
+        status: 'estimated',
+        source: 'app',
+        notes: d.notes ?? '18:20 gun sonu tahmini',
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,fund_code,nav_date' }
+    )
+  );
+}
+
+/**
+ * Gerçekleşen NAV'ı geriye dönük doldurur (DFI'de ertesi sabah).
+ * estimated_pct'e DOKUNMAZ — snapshot tarihsel kayıttır.
+ */
+export function updateNavDailyActual(
+  fundCode: string,
+  navDate: string,
+  actualPct: number,
+  actualNav: number | null,
+): Promise<WriteResult> {
+  return write('updateNavDailyActual', () =>
+    supabase
+      .from('fund_nav_daily')
+      .update({
+        actual_pct: actualPct,
+        actual_nav: actualNav,
+        actual_at: new Date().toISOString(),
+        status: 'both',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('fund_code', fundCode)
+      .eq('nav_date', navDate)
+  );
+}
