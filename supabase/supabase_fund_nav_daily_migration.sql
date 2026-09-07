@@ -26,9 +26,14 @@
 CREATE TABLE IF NOT EXISTS public.fund_nav_daily (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-  -- user_id: RLS migration'i uygulanmissa ZORUNLU (service_role ile yazan
-  -- job'lar SUPABASE_OWNER_USER_ID gondermeli). Uygulanmadiysa NULL kalabilir.
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  -- user_id ZORUNLU: RLS izolasyonunun temeli. DEFAULT auth.uid() sayesinde
+  -- uygulama JWT'den otomatik doldurur; elle deger vermek gerekmez.
+  -- service_role ile yazan bir job SUPABASE_OWNER_USER_ID gondermek zorunda.
+  --
+  -- Neden NOT NULL: UNIQUE (user_id, fund_code, nav_date) icinde user_id NULL
+  -- olsaydi PostgreSQL NULL'lari AYRI sayar, ayni gun icin sinirsiz kayit
+  -- birikirdi. NOT NULL hem izolasyonu hem upsert dogrulugunu garanti eder.
+  user_id UUID NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
 
   fund_code     VARCHAR(10)  NOT NULL,
   nav_date      DATE         NOT NULL,
@@ -65,6 +70,25 @@ CREATE TABLE IF NOT EXISTS public.fund_nav_daily (
 CREATE INDEX IF NOT EXISTS fund_nav_daily_fund_date_idx
   ON public.fund_nav_daily (fund_code, nav_date DESC);
 
+-- Sorgular loadNavDaily'de oldugu gibi nav_date ile filtrelenip siralanir.
+CREATE INDEX IF NOT EXISTS fund_nav_daily_date_idx
+  ON public.fund_nav_daily (nav_date DESC);
+
+-- -----------------------------------------------------------------------------
+-- ROW LEVEL SECURITY
+--
+-- supabase_rls_user_isolation.sql'deki "Owner X" deseninin aynisi. Buradaki
+-- politikalar olmadan tabloyu her authenticated kullanici OKURDU: A kullanicisi
+-- B'nin gun sonu tahminlerini ve gerceklesen getirilerini gorurdu.
+-- -----------------------------------------------------------------------------
+ALTER TABLE public.fund_nav_daily ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Owner FundNavDaily" ON public.fund_nav_daily;
+CREATE POLICY "Owner FundNavDaily" ON public.fund_nav_daily
+  FOR ALL TO authenticated
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
 COMMENT ON TABLE public.fund_nav_daily IS
   'Gun sonu fon tahmini (18:20 snapshot) ve TEFAS gerceklesen getirisi - kalibrasyon icin';
 
@@ -77,3 +101,13 @@ SELECT fund_code, nav_date, estimated_pct, covered_pct, actual_pct,
  ORDER BY nav_date DESC, fund_code
  LIMIT 20;
 -- Beklenen: tablo yeni olustugu icin 0 satir
+
+-- RLS acik mi? Beklenen: relrowsecurity = true
+SELECT relrowsecurity
+  FROM pg_class
+ WHERE oid = 'public.fund_nav_daily'::regclass;
+
+-- Politika kuruldu mu? Beklenen: 1 satir ("Owner FundNavDaily")
+SELECT policyname, cmd, qual, with_check
+  FROM pg_policies
+ WHERE schemaname = 'public' AND tablename = 'fund_nav_daily';

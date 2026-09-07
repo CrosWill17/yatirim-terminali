@@ -37,6 +37,9 @@ const SETUP_SQL = [
   'supabase/supabase_fund_holdings_migration.sql',
   'supabase/supabase_twitter_migration.sql',
   'supabase/supabase_fund_proposals_migration.sql',
+  // fund_nav_daily RLS'i KENDI migration'inda getiriyor (Owner FundNavDaily),
+  // bu yuzden RLS migration'indan ONCE kurulmali ki politika denetimi gorsun.
+  'supabase/supabase_fund_nav_daily_migration.sql',
 ];
 const MIGRATION = 'supabase/supabase_rls_user_isolation.sql';
 
@@ -189,6 +192,7 @@ try {
     ['portföy', 'portfolio_positions'], ['kasa', 'cash_ledger'], ['işlemler', 'transactions'],
     ['kararlar', 'execution_decisions'], ['tahminler', 'social_predictions'],
     ['ayarlar', 'app_settings'], ['fon içeriği', 'fund_holdings'], ['fon geçmişi', 'fund_holdings_history'],
+    ['gün sonu tahmini', 'fund_nav_daily'],
   ]) {
     r = await asUser(USER_B, `SELECT * FROM ${table}`);
     t(`B ${label} okuyamıyor (0 satır)`, r.ok && r.res.rowCount === 0, r.ok ? `${r.res.rowCount} satır SIZDI` : r.err.message);
