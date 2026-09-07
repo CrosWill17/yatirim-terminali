@@ -51,11 +51,24 @@ let peakInFlight = 0;
 let currentInFlight = 0;
 let urlLog: string[] = [];
 
+/**
+ * 2026-09-03 PERŞEMBE 12:00 Istanbul (= 09:00 UTC) — seans AÇIK.
+ *
+ * marketData.ts artık isBistOpen() kontrolü yaptığı için testler saate
+ * bağımlı hale geldi: akşam 18:00'dan sonra koşulsa getStockQuotes hiçbir
+ * kod için dışarı çıkmaz ve tüm testler düşerdi. Bu yüzden sistem saati
+ * SEANS İÇİ bir ana sabitleniyor; kapalı-seans davranışı ayrı describe'da.
+ */
+const OPEN_NOW = new Date('2026-09-03T09:00:00Z');   // Per 12:00 Istanbul
+const CLOSED_NOW = new Date('2026-09-03T17:30:00Z'); // Per 20:30 Istanbul
+
 beforeEach(() => {
   __resetQuoteCaches();
   peakInFlight = 0;
   currentInFlight = 0;
   urlLog = [];
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(OPEN_NOW);
 
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -215,5 +228,57 @@ describe('getMixedQuotes — fon önceliği', () => {
   it('çözülemeyen kod null kalır, uydurma yapılmaz', async () => {
     const res = await getMixedQuotes(['YOK']);
     expect(res.YOK).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* SEANS SAATLERİ — dış veri kaynağına istek atma penceresi            */
+/* ------------------------------------------------------------------ */
+describe('seans kapalıyken dış istek atılmaz', () => {
+  it('getStockQuotes kapalı seansda HİÇ fetch yapmaz, null döner', async () => {
+    vi.setSystemTime(CLOSED_NOW); // Per 20:30 Istanbul
+    const r = await getStockQuotes(['THYAO', 'GARAN']);
+    expect(urlLog.filter((u) => u.includes('yahoo'))).toHaveLength(0);
+    expect(r.THYAO).toBeNull();
+    expect(r.GARAN).toBeNull();
+  });
+
+  it('getFundQuotes kapalı seansda HİÇ fetch yapmaz (5 dk neg-cache döngüsü durur)', async () => {
+    vi.setSystemTime(CLOSED_NOW);
+    await getFundQuotes(['ABG', 'PSE']);
+    expect(urlLog.filter((u) => u.includes('fonaly'))).toHaveLength(0);
+  });
+
+  it('getMixedQuotes kapalı seansda toplam SIFIR dış istek atar', async () => {
+    vi.setSystemTime(CLOSED_NOW);
+    await getMixedQuotes(['THYAO', 'ABG', 'GARAN']);
+    expect(urlLog).toHaveLength(0);
+  });
+
+  it('açık seansta aynı kodlar fetch edilir (gate fazla kaçırmıyor)', async () => {
+    vi.setSystemTime(OPEN_NOW); // Per 12:00 Istanbul
+    await getStockQuotes(['THYAO']);
+    expect(urlLog.filter((u) => u.includes('yahoo'))).toHaveLength(1);
+  });
+
+  it('hafta sonu da kapalı sayılır — Cumartesi 12:00', async () => {
+    vi.setSystemTime(new Date('2026-09-05T09:00:00Z')); // Cmt 12:00 Istanbul
+    await getStockQuotes(['THYAO']);
+    expect(urlLog).toHaveLength(0);
+  });
+
+  it('sıcak cache kapalıyken de servis edilir (kapanış fiyatı ekranda kalır)', async () => {
+    // 1) açıkken doldur
+    vi.setSystemTime(OPEN_NOW);
+    await getStockQuotes(['THYAO']);
+    expect(urlLog.filter((u) => u.includes('yahoo'))).toHaveLength(1);
+
+    // 2) seans kapansın — TTL (60 sn) çoktan geçmiş olsa bile cache verilmeli
+    vi.setSystemTime(new Date(OPEN_NOW.getTime() + 3 * 3600_000)); // +3 saat = 15:00... açık
+    vi.setSystemTime(CLOSED_NOW); // 20:30 → kapalı, TTL 60sn çoktan geçmiş
+    urlLog = [];
+    const r = await getStockQuotes(['THYAO']);
+    expect(urlLog).toHaveLength(0);
+    expect(r.THYAO).not.toBeNull();
   });
 });

@@ -18,6 +18,7 @@
  */
 
 import { calculateGramGold, calculateGoldSilverRatio } from './calculations';
+import { isBistOpen } from './marketHours';
 import type { PublicKind } from './publicWatchlist';
 import { publicInstruments } from './publicWatchlist';
 
@@ -438,6 +439,9 @@ function assembleIndices(base: MarketData, live: LiveQuotes): MarketData['indice
 
 export async function getMarketData(): Promise<MarketData> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.data;
+  // Seans kapalı: endeksler de değişmiyor. Cache varsa onu ver, yoksa seed.
+  // Yahoo'ya çıkmıyoruz — 60 sn'lik poll gece boyu boşuna istek atıyordu.
+  if (!isBistOpen()) return cache?.data ?? SEED_MARKET;
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
@@ -507,6 +511,8 @@ let publicInFlight: Promise<PublicMarketData> | null = null;
 
 export async function getPublicMarketData(): Promise<PublicMarketData> {
   if (publicCache && Date.now() - publicCache.at < CACHE_TTL_MS) return publicCache.data;
+  // Aynı gerekçe: seans dışında fetchYahooQuote zincirine hiç girme.
+  if (!isBistOpen() && publicCache) return publicCache.data;
   if (publicInFlight) return publicInFlight;
 
   publicInFlight = (async () => {
@@ -593,14 +599,24 @@ export async function getStockQuotes(codes: string[]): Promise<Record<string, Ma
     )
   ).slice(0, QUOTE_LIMIT);
 
+  // SEANS KAPALIYSA HİÇ İSTEK ATMA. BIST 10:00-18:00 hafta ici; disinda fiyat
+  // zaten degismiyor, Yahoo'ya atilan her istek bosuna (ve ban riski).
+  // Kapaliyken cache yaşı görmezden gelinir: kapanis fiyati ekranda kalir.
+  const sessionOpen = isBistOpen();
+
   const out: Record<string, MarketQuote | null> = {};
   const missing: string[] = [];
   for (const c of wanted) {
     const hit = stockCache.get(c);
-    if (hit && Date.now() - hit.at < CACHE_TTL_MS) out[c] = hit.q;
+    if (hit && (sessionOpen ? Date.now() - hit.at < CACHE_TTL_MS : true)) out[c] = hit.q;
     else missing.push(c);
   }
   if (missing.length === 0) return out;
+  if (!sessionOpen) {
+    // Cache'te hic olmayan kodlar icin disari cikma; null don, 10:00'da dolar.
+    for (const c of missing) out[c] = null;
+    return out;
+  }
 
   if (!stockInFlight) stockInFlight = new Map();
   const flight = stockInFlight;
@@ -648,16 +664,29 @@ export async function getFundQuotes(codes: string[]): Promise<Record<string, Mar
     )
   ).slice(0, QUOTE_LIMIT);
 
+  // Seans kapalıyken fonaly'ye de çıkma. İKİ gerekçe:
+  //  (a) TEFAS NAV'ı akşam açıklanır; 10:00'da çekilen NAV zaten bir önceki
+  //      akşamın fiyatıdır — kullanıcının istediği tam olarak bu.
+  //  (b) getMixedQuotes HER kodu hem Yahoo'ya hem fonaly'ye soruyor. Hisse
+  //      kodları fonaly'de bulunamadığı için null dönüyor ve FUND_NEG_TTL_MS
+  //      (5 dk) sonra tekrar deneniyor: 105 kod x 288 tur/gun = ~30.000 bosuna
+  //      istek. Seans kapalıyken bu döngü tamamen durur.
+  const sessionOpen = isBistOpen();
+
   const out: Record<string, MarketQuote | null> = {};
   const missing: string[] = [];
   for (const c of wanted) {
     const hit = fundNavCache.get(c);
     // Başarılı sonuç 24 saat, başarısız 5 dakika cache'lenir (bkz. FUND_CACHE_TTL_MS).
     const ttl = hit && hit.q ? FUND_CACHE_TTL_MS : FUND_NEG_TTL_MS;
-    if (hit && Date.now() - hit.at < ttl) out[c] = hit.q;
+    if (hit && (sessionOpen ? Date.now() - hit.at < ttl : true)) out[c] = hit.q;
     else missing.push(c);
   }
   if (missing.length === 0) return out;
+  if (!sessionOpen) {
+    for (const c of missing) out[c] = null;
+    return out;
+  }
 
   if (!fundNavInFlight) fundNavInFlight = new Map();
   const flight = fundNavInFlight;

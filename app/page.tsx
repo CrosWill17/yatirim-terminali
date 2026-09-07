@@ -17,6 +17,7 @@ import {
 } from '@/lib/types';
 import type { MarketData } from '@/lib/marketData';
 import { PUBLIC_SEED_MARKET } from '@/lib/marketSeedPublic';
+import { isBistOpen, marketStatusLabel } from '@/lib/marketHours';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { TÜR_LABEL } from '@/lib/assetMeta';
 import { ALL_FUND_CODES, TEFAS_FON_CODES, isFundCode, isPpfCode, shouldAutoResearchFund } from '@/lib/fundCodes';
@@ -182,12 +183,25 @@ export default function Home() {
     });
   }, [assetMeta, positions]);
 
-  /* ------- Canlı piyasa verisi: girişli kullanıcı (60 sn) --------- */
+  /* ------- Canlı piyasa verisi: girişli kullanıcı (60 sn, yalnızca seans içinde) --------- */
+  const warnedClosedRef = useRef(false);
   useEffect(() => {
     if (!configured || isGuest) return; // misafir /api/market'i ÇAĞIRMAZ (P1)
     let cancelled = false;
     const load = () => {
       if (!accessToken) return;
+      // SEANS KAPALIYSA İSTEK ATMA (BIST hafta içi 10:00-18:00, Europe/Istanbul).
+      // Sunucu tarafı da aynı kontrolü yapıyor ama oraya kadar gitmek bile
+      // gereksiz: tarayıcı 60 sn'de bir boşuna ağ isteği üretmesin.
+      // Kapanışta son bilinen veri ekranda kalır — setMarket çağrılmıyor.
+      if (!isBistOpen()) {
+        if (!warnedClosedRef.current) {
+          warnedClosedRef.current = true;
+          console.info(`[market] ${marketStatusLabel()} — poll duraklatıldı, 10:00'da devam`);
+        }
+        return;
+      }
+      warnedClosedRef.current = false;
       fetch('/api/market', { headers: { Authorization: `Bearer ${accessToken}` } })
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => { if (!cancelled && d && d.indices) setMarket(d); })
