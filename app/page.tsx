@@ -753,6 +753,7 @@ export default function Home() {
     if (updatedPos) await track('Pozisyon kaydı', upsertPosition(updatedPos));
     await track('İşlem kaydı', insertTransaction(txn));
     await track('Kasa kaydı', insertCashMovement(mov));
+    saveSnapshot(nextPositions, newCash);
   };
 
   const handleParseTweet = async () => {
@@ -916,17 +917,22 @@ export default function Home() {
     setActiveTab('market');
   };
 
-  // Günlük portföy snapshot (DB bağlıyken bir kez)
+  // Günlük portföy snapshot — DB bağlıyken kaydedilir; işlem sonrası da yenilenir.
+  const saveSnapshot = (positionsNow: Position[], cashNow: number) => {
+    if (dbState !== 'connected') return;
+    const breakdown: Record<string, number> = {};
+    positionsNow.forEach((p) => { breakdown[p.symbol] = Number((p.quantity * (p.current_price || p.unit_cost)).toFixed(2)); });
+    breakdown['NAKİT'] = Number(cashNow.toFixed(2));
+    const totalNow = positionsNow.reduce((s, p) => s + p.quantity * (p.current_price || p.unit_cost), 0) + cashNow;
+    void track('Günlük snapshot', saveDailySnapshot(
+      new Date().toISOString().split('T')[0], Number(totalNow.toFixed(2)), cashNow, breakdown
+    ));
+  };
   const snapshotSavedRef = useRef(false);
   useEffect(() => {
     if (dbState !== 'connected' || snapshotSavedRef.current) return;
     snapshotSavedRef.current = true;
-    const breakdown: Record<string, number> = {};
-    livePositions.forEach((p) => { breakdown[p.symbol] = Number(posValue(p).toFixed(2)); });
-    breakdown['NAKİT'] = Number(cashBalance.toFixed(2));
-    void track('Günlük snapshot', saveDailySnapshot(
-      new Date().toISOString().split('T')[0], Number(totalPortfolioValue.toFixed(2)), cashBalance, breakdown
-    ));
+    saveSnapshot(livePositions, cashBalance);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbState]);
 

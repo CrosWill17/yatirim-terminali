@@ -155,14 +155,16 @@ async function fetchBorsaningundemiTickers(): Promise<{ xu100: MarketQuote | nul
     // bloğunda geçer — görünen widget'ta sayıdan hemen sonra % işareti vardır,
     // JSON bloğunda yoktur → ayırt edici özellik.)
     const parseWindow = (window_: string): { price: number; pct: number } | null => {
-      const nums = window_.match(/-?[\d.]{1,9}(?:,\d{1,4})?/g) ?? [];
+      // Unicode eksi (U+2212) dahil negatif sayılar için normlaştır (ör. "−67,86").
+      const normMinus = (s: string) => s.replace(/\u2212/g, '-');
+      const nums = window_.match(/[-\u2212]?[\d.]{1,9}(?:,\d{1,4})?/g) ?? [];
       if (!nums[0]) return null;
-      const price = parseFloat(nums[0].replace(/\./g, '').replace(',', '.'));
+      const price = parseFloat(normMinus(nums[0]).replace(/\./g, '').replace(',', '.'));
       if (!Number.isFinite(price)) return null;
       // % değişim: sayıdan hemen sonra (isteğe bağlı kapanış etiketi + boşluk) %
-      const pctM = window_.match(/(-?[\d.,]+)(?:<\/[a-zA-Z][^>]*>)?\s*%/);
+      const pctM = window_.match(/([-\u2212]?[\d.,]+)(?:<\/[a-zA-Z][^>]*>)?\s*%/);
       if (!pctM || !pctM[1]) return null;
-      const pct = parseFloat(pctM[1].replace(',', '.'));
+      const pct = parseFloat(normMinus(pctM[1]).replace(',', '.'));
       if (!Number.isFinite(pct) || Math.abs(pct) > 30) return null;
       return { price, pct };
     };

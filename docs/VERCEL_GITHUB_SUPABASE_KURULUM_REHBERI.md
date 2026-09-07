@@ -1,11 +1,12 @@
-# 🌐 YATIRIM TERMİNALİ v3.1 — GITHUB, SUPABASE & VERCEL KURULUM REHBERİ
+# 🌐 YATIRIM TERMİNALİ v3.4 — GITHUB, SUPABASE & VERCEL KURULUM REHBERİ
 
-Bu rehber, **Yatırım Terminali v3.1** projenizi GitHub'a yükleyip **Supabase** veritabanına bağlayarak
+Bu rehber, **Yatırım Terminali v3.4** projenizi GitHub'a yükleyip **Supabase** veritabanına bağlayarak
 **Vercel** üzerinde dakikalar içinde canlıya almanızı sağlar.
 
-> ⚠️ **v3.1 güvenlik notu:** Bu sürümde RLS politikaları auth tabanlıdır; veritabanına erişmek için
-> terminal içinden oturum açmanız gerekir. `service_role` anahtarı bu mimaride **kesinlikle kullanılmaz**
-> (eski v3.0 dokümantasyondaki `SUPABASE_SERVICE_ROLE_KEY` satırını uygulamanız GEREKMEZ).
+> ⚠️ **v3.4 güvenlik notu:** Bu sürümde RLS politikaları kullanıcı yalıtımlıdır (`auth.uid() = user_id`);
+> veritabanına erişmek için terminal içinden oturum açmanız gerekir. `service_role` anahtarı **uygulama
+> (Vercel / tarayıcı) tarafında asla kullanılmaz** — yalnızca GitHub Actions'taki sunucu-taraflı admin
+> script'lerinde (`fund-holdings-sync`, `twitter-sync`) kullanılır. Vercel env'lerine eklemeniz GEREKMEZ.
 
 ---
 
@@ -33,15 +34,17 @@ Bu rehber, **Yatırım Terminali v3.1** projenizi GitHub'a yükleyip **Supabase*
    - **Project URL:** `https://xxxxxxxxxxxx.supabase.co`
    - **anon / public key** (göz simgesine tıklayıp kopyalayın): `eyJh...`
 
-   🔒 **`service_role` key'i KOPYALAMAYIN, KULLANMAYIN.** O anahtar tüm güvenlik kurallarını atlar;
-   bu projede hiçbir yerde (ne `.env`'de ne Vercel'de) yeri yoktur.
+   🔒 **`service_role` key'ini VERCEL'E / TARAYICIYA KOYMAYIN.** O anahtar tüm güvenlik kurallarını atlar;
+   bu projede yalnızca GitHub Actions'taki sunucu-taraflı admin script'leri (`fund-holdings-sync`,
+   `twitter-sync`) tarafından kullanılır ve bu amaçla repo **GitHub Secrets**'ına eklenir
+   (`SUPABASE_SERVICE_ROLE_KEY`). Uygulama tarafında (ne `.env.local`'de ne Vercel env'lerinde) yeri yoktur.
 
 ---
 
 ## 🐙 ADIM 2: GITHUB REPOSU
 
 Reponuz zaten GitHub'daysa (bu ortamda `CrosWill17/yatirim-terminali`) bu adımı atlayın.
-Yoksa: `git init` → `git add .` → `git commit -m "feat: v3.1"` → `git push -u origin main`.
+Yoksa: `git init` → `git add .` → `git commit -m "feat: v3.4"` → `git push -u origin main`.
 
 > 💡 `.env` dosyası `.gitignore` ile korunur; anahtarlarınız asla repo'ya gitmez.
 
@@ -108,7 +111,7 @@ Bilgisayarınızda `npm run dev` ile çalıştırırken aynı değerleri proje k
 
 ## 🔒 GÜVENLİK NOTLARI
 - `anon` key tarayıcıya da gider — bu **tasarımı gereğidir** ve güvenliği RLS politikaları sağlar:
-  v3.1 şemasında her tabloya yalnızca oturum açmış (auth.uid()) kullanıcı okur-yazar.
+  v3.4 şemasında her satır yalnızca sahibine (`auth.uid() = user_id`) görünür ve yazılabilir.
   Anon key tek başına veritabanına **erişemez**.
 - `service_role` key'ini asla `NEXT_PUBLIC_` yapmayın, asla Vercel env'lerine eklemeyin;
   sızarsa veritabanınızın tüm RLS korumasını geçilebilir.
