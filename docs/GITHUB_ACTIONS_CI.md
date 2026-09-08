@@ -74,3 +74,65 @@ Yerelde: `npm run test:db` (ağ gerekmez, harici servis gerekmez).
 
 `ci.yml` hiçbir secret kullanmaz (yalnızca kod derler/test eder).
 Sync job'ları için gerekenler README → "GitHub Actions secrets" bölümünde.
+
+---
+
+## 🔧 2026-09-08 — twitter-sync arızası: "column ... user_id does not exist"
+
+### Belirti
+
+`twitter-sync` her 30 dakikada kırmızıya düşüyordu. Adım `3/3 Parse + Supabase`,
+üç denemenin üçünde de aynı hatayla:
+
+```
+Supabase senkronizasyonu: deneme 1/3
+HATA (mevcut id sorgusu): column social_predictions.user_id does not exist
+...
+HATA: twitter sync 3 denemede de başarısız oldu.
+```
+
+### Kök neden
+
+`supabase/supabase_rls_user_isolation.sql` migrasyonu **canlı veritabanında
+çalıştırılmamıştı**, ama job kodu onun uygulandığını **varsayıyordu**:
+
+- okumalar `.eq('user_id', OWNER_ID)` ile daraltılıyordu,
+- insert payload'ına `user_id` ekleniyordu,
+- `onConflict` hedefi `user_id,...` bileşiğiydi.
+
+Sütun olmadığı için PostgREST `42703` döndürüyor, retry döngüsü de aynı
+yapılandırma hatasını 3 kez tekrarlıyordu. Retry burada işe yaramaz: hata
+geçici değil, şemasal.
+
+Not: aynı kök neden `fund-day-end` job'unu da düşürmüştü (orada secret boştu,
+sonra da aynı sütun varsayımı sıradaydı).
+
+### Çözüm — "varsayma, yokla"
+
+Yeni `lib/dbCompat.ts` katmanı eklendi. Job'lar şemayı sabit varsaymak yerine
+başlangıçta **bir kez yokluyor** (`select user_id limit 1`) ve moda göre
+davranıyor:
+
+| Şema | Davranış |
+|---|---|
+| `user_id` VAR (migrasyon uygulanmış) | Eskisi gibi: kullanıcı bazlı filtre, `user_id` yazımı, bileşik `onConflict` |
+| `user_id` YOK (legacy) | Filtre eklenmez, `user_id` gönderilmez, `onConflict` user_id'siz olur + net bir UYARI basılır |
+| Yoklama ağ/izin hatası verirse | **Güvenli taraf:** sütun VAR kabul edilir; geçici bir ağ hatası yalıtımı kazara kapatmasın |
+
+Sonuç: migrasyon uygulanmamışken cron kırmızıya boyanmaz ve veri akmaya devam
+eder; migrasyon uygulandığı an job **kendiliğinden** yalıtımlı moda geçer.
+
+Dokunulan yerler:
+
+- `lib/dbCompat.ts` (yeni) + `lib/dbCompat.test.ts` (19 test)
+- `scripts/twitter_sync/sync.ts` — `social_predictions`
+- `scripts/twitter_sync/ocr_holdings.py` — `fund_holding_proposals`
+- `scripts/fund_holdings/sync.ts` — `fund_holdings`
+- `scripts/fund_holdings/day-end.ts` — `fund_holdings`, `fund_nav_daily`
+
+### Kalıcı çözüm (önerilir)
+
+Legacy mod bir **köprüdür**, hedef değil. Yalıtımı gerçekten açmak için
+Supabase → SQL Editor'de `supabase/supabase_rls_user_isolation.sql` dosyasını
+çalıştırın. Job'lar sonraki turda kendiliğinden yalıtımlı moda geçer; kodda
+değişiklik gerekmez.

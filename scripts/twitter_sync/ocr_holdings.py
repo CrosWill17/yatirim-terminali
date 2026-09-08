@@ -62,6 +62,29 @@ TICKER_RE = re.compile(r"\b([A-Z]{2,5})\b")
 WEIGHT_ARROW_RE = re.compile(r"TAHM[İI]N[İI]\s*AĞIRLIK\s*%?([\d.,]+)\s*->\s*%?([\d.,]+)", re.IGNORECASE)
 WEIGHT_SINGLE_RE = re.compile(r"TAHM[İI]N[İI]\s*AĞIRLIK\s*%?([\d.,]+)", re.IGNORECASE)
 
+MISSING_COLUMN_RE = re.compile(
+    r"column .* does not exist|could not find the '.*' column|schema cache",
+    re.IGNORECASE,
+)
+
+
+def table_has_user_id(sb, table: str) -> bool:
+    """
+    Tabloda user_id sütunu var mı? (supabase_rls_user_isolation.sql koşuldu mu)
+
+    Tek hafif sorgu (LIMIT 1) ile yoklar:
+      - hata yok                  -> sütun VAR
+      - "does not exist" / 42703  -> sütun YOK (legacy şema)
+      - başka hata (ağ/izin)      -> GÜVENLİ TARAF: VAR kabul edilir; geçici bir
+        ağ hatası yüzünden yanlışlıkla yalıtımsız moda düşmeyelim.
+    """
+    try:
+        sb.table(table).select("user_id").limit(1).execute()
+        return True
+    except Exception as e:  # noqa: BLE001 - kütüphane tipli hata fırlatmıyor
+        return not MISSING_COLUMN_RE.search(str(e))
+
+
 def parse_tr_number(s: str):
     """TR sayı: 48,02 veya 3.25 veya 51,00 -> float"""
     if not s:
@@ -201,6 +224,20 @@ def main():
             sys.exit(1)
         sb = create_client(supa_url, supa_key)
 
+    # ŞEMA YOKLAMASI — supabase_rls_user_isolation.sql uygulanmadıysa
+    # fund_holding_proposals.user_id sütunu YOKTUR. O sütunu göndermek/hedef
+    # göstermek PostgREST hatası verir ve job düşer. Varsayma; bir kez yokla.
+    has_user_id = True
+    if sb is not None:
+        has_user_id = table_has_user_id(sb, "fund_holding_proposals")
+        if not has_user_id:
+            print(
+                "UYARI: fund_holding_proposals.user_id sütunu YOK — "
+                "supabase/supabase_rls_user_isolation.sql henüz uygulanmamış. "
+                "Kullanıcı yalıtımı olmadan (legacy şema) devam ediliyor.",
+                file=sys.stderr,
+            )
+
     total_proposals = []
     for t in tweets:
         text = t.get("text") or ""
@@ -246,8 +283,7 @@ def main():
                 # %0.01 altı atılır (kullanıcı kuralı)
                 if h["weight_pct"] < 0.01:
                     continue
-                total_proposals.append({
-                    "user_id": owner_id,
+                proposal = {
                     "fund_code": fund_code,
                     "ticker": h["ticker"],
                     "weight_pct": h["weight_pct"],
@@ -255,13 +291,16 @@ def main():
                     "source_tweet_id": f"tw-{tweet_id}",
                     "predictor_handle": "@sevketozhan",
                     "raw_text": f"{text[:200]} | OCR: {ocr_text[:300]}",
-                })
+                }
+                if has_user_id:
+                    proposal["user_id"] = owner_id
+                total_proposals.append(proposal)
 
     # Deduplicate proposals: tekil anahtar artık BİLEŞİK
     # (user_id, fund_code, ticker, source_tweet_id)
     dedup = {}
     for p in total_proposals:
-        key = (p["user_id"], p["fund_code"], p["ticker"], p["source_tweet_id"])
+        key = (p.get("user_id"), p["fund_code"], p["ticker"], p["source_tweet_id"])
         dedup[key] = p
     total_proposals = list(dedup.values())
 
@@ -275,7 +314,12 @@ def main():
         if total_proposals:
             # Upsert pending proposals
             try:
-                res = sb.table("fund_holding_proposals").upsert(total_proposals, on_conflict="user_id,fund_code,ticker,source_tweet_id").execute()
+                on_conflict = (
+                    "user_id,fund_code,ticker,source_tweet_id"
+                    if has_user_id
+                    else "fund_code,ticker,source_tweet_id"
+                )
+                res = sb.table("fund_holding_proposals").upsert(total_proposals, on_conflict=on_conflict).execute()
                 # Supabase-py hata fırlatmaz, data/error döner — basit kontrol
                 if hasattr(res, 'data'):
                     print(f"ÖZET: {len(tweets)} tweet → {len(total_proposals)} öneri yazıldı (fund_holding_proposals)")

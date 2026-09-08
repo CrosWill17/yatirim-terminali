@@ -27,6 +27,13 @@ import { createClient } from '@supabase/supabase-js';
 import { fetchRawMixedQuotes } from '../../lib/marketData';
 import { buildDayEndPlan, type DayEndFundInput } from '../../lib/dayEndSnapshot';
 import type { FundNavDailyRow } from '../../lib/types';
+import {
+  hasUserIdColumn,
+  legacySchemaWarning,
+  scopeToOwner,
+  withOwner,
+  conflictTarget,
+} from '../../lib/dbCompat';
 
 const DRY_RUN = process.env.DRY_RUN === '1';
 const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
@@ -60,11 +67,17 @@ const n2 = (x: number | null | undefined) => (x == null ? '—' : x.toFixed(2));
 async function main() {
   console.log(`GÜN SONU TAHMİNİ — ${DRY_RUN ? 'DRY_RUN (yazma yok)' : 'CANLI'}`);
 
+  // ŞEMA YOKLAMASI: user_id sütunu yoksa (RLS migrasyonu koşulmamış) ona göre
+  // filtrelemek PostgREST 42703 verir ve job düşer. Varsayma — yokla.
+  const hasUserId = await hasUserIdColumn(db as any, 'fund_holdings');
+  if (!hasUserId) console.warn(legacySchemaWarning('fund_holdings'));
+
   // 1) Fon içerikleri
-  const { data: rows, error: rowsErr } = await db
-    .from('fund_holdings')
-    .select('fund_code, ticker, company_name, weight_pct')
-    .eq('user_id', OWNER_ID);
+  const { data: rows, error: rowsErr } = await scopeToOwner(
+    db.from('fund_holdings').select('fund_code, ticker, company_name, weight_pct'),
+    OWNER_ID,
+    hasUserId,
+  );
   if (rowsErr) {
     const m = rowsErr.message || '';
     if (/does not exist|schema cache/i.test(m)) {
@@ -96,10 +109,12 @@ async function main() {
   console.log(`fon: ${funds.size}, kod: ${tickers.size}`);
 
   // 2) Kalibrasyon geçmişi + bugünün kaydı var mı
-  const { data: navRows, error: navErr } = await db
-    .from('fund_nav_daily')
-    .select('*')
-    .eq('user_id', OWNER_ID)
+  const navHasUserId = await hasUserIdColumn(db as any, 'fund_nav_daily');
+  const { data: navRows, error: navErr } = await scopeToOwner(
+    db.from('fund_nav_daily').select('*'),
+    OWNER_ID,
+    navHasUserId,
+  )
     .gte('nav_date', new Date(Date.now() - 120 * 86400_000).toISOString().slice(0, 10));
   if (navErr) {
     console.error('HATA fund_nav_daily okunamadı:', navErr.message);
@@ -168,8 +183,7 @@ async function main() {
   for (const it of plan.toWrite) {
     const d = it.draft!;
     const { error } = await db.from('fund_nav_daily').upsert(
-      {
-        user_id: OWNER_ID,
+      withOwner({
         fund_code: d.fund_code,
         nav_date: d.nav_date,
         estimated_pct: d.estimated_pct,
@@ -179,8 +193,8 @@ async function main() {
         source: 'cron',
         notes: '18:20 gun sonu tahmini (Actions)',
         updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id,fund_code,nav_date' },
+      }, OWNER_ID, navHasUserId),
+      { onConflict: conflictTarget(['fund_code', 'nav_date'], navHasUserId) },
     );
     if (error) console.error(`  HATA ${d.fund_code}: ${error.message}`);
     else ok++;

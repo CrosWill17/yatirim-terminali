@@ -23,6 +23,13 @@ import {
   validateParsed,
   type FundSourceConfig,
 } from '../../lib/fundHoldings';
+import {
+  hasUserIdColumn,
+  legacySchemaWarning,
+  scopeToOwner,
+  withOwnerAll,
+  conflictTarget,
+} from '../../lib/dbCompat';
 
 const DRY_RUN = process.env.DRY_RUN === '1';
 const FIXTURE_DIR = process.env.FIXTURE_DIR ?? ''; // ör. ./test/fixtures → {CODE}.html oku
@@ -119,6 +126,12 @@ async function main(): Promise<void> {
 
   const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
+  // ŞEMA YOKLAMASI: supabase_rls_user_isolation.sql uygulanmadıysa user_id
+  // sütunu YOKTUR; ona göre filtrelemek/yazmak PostgREST 42703 verir ve job
+  // düşerdi. Varsaymak yerine bir kez yokla.
+  const hasUserId = await hasUserIdColumn(supabase as any, 'fund_holdings');
+  if (!hasUserId) console.warn(legacySchemaWarning('fund_holdings'));
+
   let inserted = 0;
   let deleted = 0;
   let skippedManual = 0;
@@ -128,8 +141,13 @@ async function main(): Promise<void> {
 
     // 1) Manuel ve KAP PDF override'ları koru: source='manual' ve 'kap-pdf' ASLA ezilmez (ham veri, onay gerektirmez)
     //    KAP PDF ana veri kaynağıdır (kullanıcı şartı)
-    const { data: existingRows } = await supabase.from('fund_holdings').select('ticker, source, as_of_date').eq('user_id', OWNER_ID).eq('fund_code', fundCode);
-    const existing = existingRows ?? [];
+    const { data: existingRows } = await scopeToOwner(
+      supabase.from('fund_holdings').select('ticker, source, as_of_date'),
+      OWNER_ID,
+      hasUserId,
+    ).eq('fund_code', fundCode);
+    // scopeToOwner tipi gevşetir (bkz. lib/dbCompat.ts); okunan şekli burada geri veriyoruz.
+    const existing = (existingRows ?? []) as { ticker: string; source: string; as_of_date: string | null }[];
     const protectedTickers = new Set(existing.filter((e) => ['manual', 'kap-pdf', 'calibration'].includes(e.source)).map((e) => e.ticker));
     const autoRows = rows.filter((r) => !protectedTickers.has(r.ticker));
     skippedManual += protectedTickers.size;
@@ -152,7 +170,10 @@ async function main(): Promise<void> {
     if (autoRows.length > 0) {
       const { error } = await supabase
         .from('fund_holdings')
-        .upsert(autoRows.map((r) => ({ ...r, user_id: OWNER_ID })), { onConflict: 'user_id,fund_code,ticker' });
+        .upsert(
+          withOwnerAll(autoRows as unknown as Record<string, unknown>[], OWNER_ID, hasUserId),
+          { onConflict: conflictTarget(['fund_code', 'ticker'], hasUserId) },
+        );
       if (error) throw new Error(`[${fundCode}] upsert hatası: ${error.message}`);
       inserted += autoRows.length;
     }
@@ -161,10 +182,11 @@ async function main(): Promise<void> {
     const keepSet = new Set(tickers);
     const stale = existing.filter((e) => !['manual', 'kap-pdf', 'calibration'].includes(e.source) && !keepSet.has(e.ticker));
     if (stale.length > 0) {
-      const { error } = await supabase
-        .from('fund_holdings')
-        .delete()
-        .eq('user_id', OWNER_ID)   // service_role RLS'i atlar → sahibi elle daralt
+      const { error } = await scopeToOwner(
+        supabase.from('fund_holdings').delete(),
+        OWNER_ID,   // service_role RLS'i atlar → sahibi elle daralt (sütun varsa)
+        hasUserId,
+      )
         .eq('fund_code', fundCode)
         .in('ticker', stale.map((s) => s.ticker));
       if (error) throw new Error(`[${fundCode}] stale silme hatası: ${error.message}`);
