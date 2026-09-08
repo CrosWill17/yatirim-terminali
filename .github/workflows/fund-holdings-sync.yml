@@ -19,6 +19,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: "Ön kontrol: gerekli secret'lar (eksikse hızlı ve net dur)"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_OWNER_USER_ID: ${{ secrets.SUPABASE_OWNER_USER_ID }}
+        run: |
+          eksik=""
+          if [ -z "$SUPABASE_URL" ]; then eksik="$eksik SUPABASE_URL"; fi
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then eksik="$eksik SUPABASE_SERVICE_ROLE_KEY"; fi
+          if [ -z "$SUPABASE_OWNER_USER_ID" ]; then eksik="$eksik SUPABASE_OWNER_USER_ID"; fi
+          if [ -n "$eksik" ]; then
+            echo "::error::Eksik GitHub secret'ları:$eksik"
+            echo "Ekleyin: GitHub → Settings → Secrets and variables → Actions → New repository secret."
+            echo "SUPABASE_OWNER_USER_ID değeri: Supabase → Authentication → Users → kendi hesabınızın UUID'si (SELECT id FROM auth.users)."
+            exit 1
+          fi
+          if ! printf '%s' "$SUPABASE_OWNER_USER_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+            echo "::error::SUPABASE_OWNER_USER_ID UUID formatında değil (auth.users.id olmalı)."
+            echo "Değer: Supabase → Authentication → Users → kendi hesabınızın UUID'si."
+            exit 1
+          fi
+          echo "OK: gerekli secret'lar tanımlı."
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
