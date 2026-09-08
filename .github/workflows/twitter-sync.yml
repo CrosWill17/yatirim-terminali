@@ -14,6 +14,35 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: "Ön kontrol: gerekli secret'lar (eksikse hızlı ve net dur)"
+        # RLS izolasyonu sonrası (supabase_rls_user_isolation.sql) tüm satırlar bir
+        # kullanıcıya ait ve service_role bağlamında auth.uid() NULL — sync job'ları
+        # kime yazdığını bilmek zorunda. SUPABASE_OWNER_USER_ID secret'ı eksikse
+        # her 30 dk'da 3 deneme + kurulum + OCR yapılıp "exit code 1" ile düşülüyor.
+        # Bu adım yapılandırma hatalarını en başta, net bir hata mesajıyla yakalar.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_OWNER_USER_ID: ${{ secrets.SUPABASE_OWNER_USER_ID }}
+          TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
+        run: |
+          eksik=""
+          if [ -z "$SUPABASE_URL" ]; then eksik="$eksik SUPABASE_URL"; fi
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then eksik="$eksik SUPABASE_SERVICE_ROLE_KEY"; fi
+          if [ -z "$SUPABASE_OWNER_USER_ID" ]; then eksik="$eksik SUPABASE_OWNER_USER_ID"; fi
+          if [ -z "$TWITTER_AUTH_TOKEN" ]; then eksik="$eksik TWITTER_AUTH_TOKEN"; fi
+          if [ -n "$eksik" ]; then
+            echo "::error::Eksik GitHub secret'ları:$eksik"
+            echo "Ekleyin: GitHub → Settings → Secrets and variables → Actions → New repository secret."
+            echo "SUPABASE_OWNER_USER_ID değeri: Supabase → Authentication → Users → kendi hesabınızın UUID'si (SELECT id FROM auth.users)."
+            exit 1
+          fi
+          if ! printf '%s' "$SUPABASE_OWNER_USER_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+            echo "::error::SUPABASE_OWNER_USER_ID UUID formatında değil (auth.users.id olmalı)."
+            echo "Değer: Supabase → Authentication → Users → kendi hesabınızın UUID'si."
+            exit 1
+          fi
+          echo "OK: gerekli secret'lar tanımlı."
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
