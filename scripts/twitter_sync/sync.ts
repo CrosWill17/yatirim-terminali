@@ -28,6 +28,13 @@ import { readFileSync } from 'node:fs';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { parseSocialTweet, parseAllSocialTweets, KNOWN_SYMBOLS } from '../../lib/parseSocial';
 import { calculateAccuracyScore } from '../../lib/calculations';
+import {
+  hasUserIdColumn,
+  legacySchemaWarning,
+  scopeToOwner,
+  withOwnerAll,
+  isDuplicateError,
+} from '../../lib/dbCompat';
 
 /** Rule 1: tek dokunulan tablo. */
 const TABLO = 'social_predictions';
@@ -105,6 +112,11 @@ async function main(): Promise<void> {
 
   const DEFAULT_HANDLE = '@sevketozhan';
   let skipped = 0;
+  /**
+   * Hedef tabloda user_id sütunu var mı? DB'ye bağlanınca YOKLANIR (aşağıda),
+   * varsayılmaz. false ise migrasyon öncesi (legacy) şema demektir.
+   */
+  let hasUserId = true;
 
   // ---------------- 1) PARSE (saf, DB'siz) ----------------
   const inserts: PredictionRow[] = [];
@@ -189,16 +201,24 @@ async function main(): Promise<void> {
   const openPool = new Map<string, { sourceTweetId: string; predPct: number }[]>(); // fund|date
 
   if (sb) {
+    // ŞEMA YOKLAMASI — sabit varsayım yok.
+    // Canlıda supabase_rls_user_isolation.sql henüz koşulmamışsa user_id sütunu
+    // YOKTUR; ona göre filtrelemek PostgREST 42703 verir ve cron her 30 dakikada
+    // düşerdi (gerçek arıza buydu). Bir kez yokla, moda göre davran.
+    hasUserId = await hasUserIdColumn(sb as any, TABLO);
+    if (!hasUserId) console.warn(legacySchemaWarning(TABLO));
+
     // PostgREST `.in()` boş dizide ve uzun URL'de (yüzlerce tweet id) kırılır;
     // bu da twitter-sync cron'unu her 30 dakikada kırmızıya boyuyordu.
     const IN_CHUNK = 80;
     for (let i = 0; i < tweetSourceIds.length; i += IN_CHUNK) {
       const chunk = tweetSourceIds.slice(i, i + IN_CHUNK);
       if (chunk.length === 0) continue;
-      const { data: existing, error: e1 } = await sb
-        .from(TABLO)
-        .select('source_tweet_id')
-        .eq('user_id', ownerId)
+      const { data: existing, error: e1 } = await scopeToOwner(
+        sb.from(TABLO).select('source_tweet_id'),
+        ownerId,
+        hasUserId,
+      )
         .in('source_tweet_id', chunk);
       if (e1) { console.error('HATA (mevcut id sorgusu):', e1.message); process.exit(1); }
       (existing ?? []).forEach((r: any) => r.source_tweet_id && existingIds.add(r.source_tweet_id));
@@ -207,10 +227,11 @@ async function main(): Promise<void> {
     const funds = Array.from(new Set(inserts.map((r) => r.fund_code)));
     const dates = Array.from(new Set(inserts.map((r) => r.prediction_date)));
     if (funds.length > 0 && dates.length > 0) {
-      const { data: openRows, error: e2 } = await sb
-        .from(TABLO)
-        .select('source_tweet_id, fund_code, prediction_date, predicted_return_pct')
-        .eq('user_id', ownerId)
+      const { data: openRows, error: e2 } = await scopeToOwner(
+        sb.from(TABLO).select('source_tweet_id, fund_code, prediction_date, predicted_return_pct'),
+        ownerId,
+        hasUserId,
+      )
         .eq('status', 'BEKLIYOR')
         .is('actual_return_pct', null)
         .in('fund_code', funds)
@@ -274,12 +295,13 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(verifyOps, null, 2));
   } else if (sb) {
     if (fresh.length > 0) {
-      const payload = fresh.map((r) => ({ ...r, user_id: ownerId }));
+      // Legacy şemada user_id sütunu YOK; göndermek PGRST204 ile insert'i kırardı.
+      const payload = withOwnerAll(fresh as unknown as Record<string, unknown>[], ownerId, hasUserId) as unknown as PredictionRow[];
       const { error: e3 } = await sb.from(TABLO).insert(payload);
       if (e3) {
         const msg = e3.message || '';
         // Unique index (source_tweet_id) — mevcut id sorgusu kaçırsa bile cron düşmesin.
-        if (/duplicate key|unique constraint|already exists/i.test(msg)) {
+        if (isDuplicateError(e3)) {
           console.log('UYARI: bazı satırlar zaten vardı (idempotent atlandı).');
         } else if (/null value|predicted_return_pct/i.test(msg)) {
           const withValue = payload.filter((r) => r.predicted_return_pct != null);
@@ -297,10 +319,13 @@ async function main(): Promise<void> {
       }
     }
     for (const v of verifyOps) {
-      const { error: e4 } = await sb
-        .from(TABLO)
-        .update({ actual_return_pct: v.actual, accuracy_score: v.acc, status: 'DOGRULANDI' })
-        .eq('user_id', ownerId)
+      const { error: e4 } = await scopeToOwner(
+        sb
+          .from(TABLO)
+          .update({ actual_return_pct: v.actual, accuracy_score: v.acc, status: 'DOGRULANDI' }),
+        ownerId,
+        hasUserId,
+      )
         .eq('source_tweet_id', v.source_tweet_id);
       if (e4) { console.error('HATA (update):', e4.message); process.exit(1); }
     }
