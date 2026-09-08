@@ -59,7 +59,6 @@ const n2 = (x: number | null | undefined) => (x == null ? '—' : x.toFixed(2));
 
 async function main() {
   console.log(`GÜN SONU TAHMİNİ — ${DRY_RUN ? 'DRY_RUN (yazma yok)' : 'CANLI'}`);
-  console.log(`sahip: ${OWNER_ID}`);
 
   // 1) Fon içerikleri
   const { data: rows, error: rowsErr } = await db
@@ -67,6 +66,11 @@ async function main() {
     .select('fund_code, ticker, company_name, weight_pct')
     .eq('user_id', OWNER_ID);
   if (rowsErr) {
+    const m = rowsErr.message || '';
+    if (/does not exist|schema cache/i.test(m)) {
+      console.log('UYARI: fund_holdings yok — migration henüz uygulanmamış, yazılacak iş yok.');
+      return;
+    }
     console.error('HATA fund_holdings okunamadı:', rowsErr.message);
     process.exit(1);
   }
@@ -119,7 +123,12 @@ async function main() {
   console.log(`geçmiş satır: ${history.length}`);
 
   // 3) Kapanış fiyatları — seans kapalı olduğu için cache'li yol kullanılamaz.
-  const quotes = await fetchRawMixedQuotes(Array.from(tickers));
+  let quotes: Awaited<ReturnType<typeof fetchRawMixedQuotes>> = {};
+  try {
+    quotes = await fetchRawMixedQuotes(Array.from(tickers));
+  } catch (e) {
+    console.error('UYARI: fiyat çekimi başarısız, boş set ile devam:', e instanceof Error ? e.message : e);
+  }
   const prices: Record<string, { price: number; changePct: number } | null> = {};
   let fiyatli = 0;
   for (const [code, q] of Object.entries(quotes)) {
