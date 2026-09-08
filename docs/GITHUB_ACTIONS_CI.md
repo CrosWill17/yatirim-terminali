@@ -23,7 +23,7 @@ kimse fark etmemişti (Vercel deploy'u da o commit'te başarısız olurdu).
 |---|---|---|
 | Kur | `npm ci` | `package-lock.json`'dan birebir |
 | Tip kontrolü | `npm run typecheck` | `strict: true` |
-| Birim testler (1. geçiş) | `npm test` | 303 test |
+| Birim testler (1. geçiş) | `npm test` | 323 test |
 | Production build | `npm run build` | Kırık build main'e girmesin |
 | Birim testler (2. geçiş) | `npm test` | ⬇️ aşağıya bakın |
 | Bundle sızıntı denetimi | `grep` | Seed portföyü client JS'ine sızmamalı |

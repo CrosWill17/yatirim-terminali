@@ -27,7 +27,7 @@
   gerçekleşen getiri girişiyle isabet puanı ve güven skoru güncellemesi.
 - **🧬 Fon içeriği** — KAP PDF'i ana kaynak (`/api/fund-holdings/parse-pdf`),
   fintables/rotaborsa otomatik sync ikincil kaynak; manuel/KAP satırları asla ezilmez.
-- **🧪 Test & CI** — **303 birim test** (Vitest) + **38 RLS yalıtım testi**
+- **🧪 Test & CI** — **323 birim test** (Vitest) + **38 RLS yalıtım testi**
   (gerçek PostgreSQL'e karşı) + GitHub Actions CI (typecheck + test + build +
   bundle sızıntı denetimi), `strict: true` TypeScript.
 
@@ -40,7 +40,7 @@
 ```bash
 npm install
 npm run dev        # http://localhost:3000
-npm test           # 303 birim test
+npm test           # 323 birim test
 npm run test:db    # RLS yalıtımını gerçek PostgreSQL'e karşı doğrula
 npm run typecheck  # strict tip kontrolü
 npm run build      # production build
