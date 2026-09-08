@@ -1,5 +1,5 @@
 /**
- * YATIRIM TERMİNALİ v3.1 — PİYASA VERİ MOTORU
+ * YATIRIM TERMİNALİ v3.4 — PİYASA VERİ MOTORU
  *
  * Katmanlı veri mimarisi (her enstrüman için en sağlam kaynağa düşer):
  *
