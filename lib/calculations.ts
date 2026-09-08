@@ -1,5 +1,5 @@
 /**
- * YATIRIM TERMİNALİ v3.1 — FİNANSAL FORMÜLLER VE HESAPLAMA MOTORU
+ * YATIRIM TERMİNALİ v3.4 — FİNANSAL FORMÜLLER VE HESAPLAMA MOTORU
  */
 import { isEquityIntensiveFund } from './fundCodes';
 
