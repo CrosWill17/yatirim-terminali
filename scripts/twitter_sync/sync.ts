@@ -189,13 +189,20 @@ async function main(): Promise<void> {
   const openPool = new Map<string, { sourceTweetId: string; predPct: number }[]>(); // fund|date
 
   if (sb) {
-    const { data: existing, error: e1 } = await sb
-      .from(TABLO)
-      .select('source_tweet_id')
-      .eq('user_id', ownerId)
-      .in('source_tweet_id', tweetSourceIds);
-    if (e1) { console.error('HATA (mevcut id sorgusu):', e1.message); process.exit(1); }
-    (existing ?? []).forEach((r: any) => r.source_tweet_id && existingIds.add(r.source_tweet_id));
+    // PostgREST `.in()` boş dizide ve uzun URL'de (yüzlerce tweet id) kırılır;
+    // bu da twitter-sync cron'unu her 30 dakikada kırmızıya boyuyordu.
+    const IN_CHUNK = 80;
+    for (let i = 0; i < tweetSourceIds.length; i += IN_CHUNK) {
+      const chunk = tweetSourceIds.slice(i, i + IN_CHUNK);
+      if (chunk.length === 0) continue;
+      const { data: existing, error: e1 } = await sb
+        .from(TABLO)
+        .select('source_tweet_id')
+        .eq('user_id', ownerId)
+        .in('source_tweet_id', chunk);
+      if (e1) { console.error('HATA (mevcut id sorgusu):', e1.message); process.exit(1); }
+      (existing ?? []).forEach((r: any) => r.source_tweet_id && existingIds.add(r.source_tweet_id));
+    }
 
     const funds = Array.from(new Set(inserts.map((r) => r.fund_code)));
     const dates = Array.from(new Set(inserts.map((r) => r.prediction_date)));
@@ -267,8 +274,27 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(verifyOps, null, 2));
   } else if (sb) {
     if (fresh.length > 0) {
-      const { error: e3 } = await sb.from(TABLO).insert(fresh.map((r) => ({ ...r, user_id: ownerId })));
-      if (e3) { console.error('HATA (insert):', e3.message); process.exit(1); }
+      const payload = fresh.map((r) => ({ ...r, user_id: ownerId }));
+      const { error: e3 } = await sb.from(TABLO).insert(payload);
+      if (e3) {
+        const msg = e3.message || '';
+        // Unique index (source_tweet_id) — mevcut id sorgusu kaçırsa bile cron düşmesin.
+        if (/duplicate key|unique constraint|already exists/i.test(msg)) {
+          console.log('UYARI: bazı satırlar zaten vardı (idempotent atlandı).');
+        } else if (/null value|predicted_return_pct/i.test(msg)) {
+          const withValue = payload.filter((r) => r.predicted_return_pct != null);
+          if (withValue.length === 0) {
+            console.log('UYARI: predicted_return_pct NOT NULL — VERİ EKSİK satırlar atlandı (migration 2 çalıştırılmamış olabilir).');
+          } else {
+            const { error: e3b } = await sb.from(TABLO).insert(withValue);
+            if (e3b) { console.error('HATA (insert):', e3b.message); process.exit(1); }
+            console.log('UYARI: null predicted_return_pct satırları atlandı.');
+          }
+        } else {
+          console.error('HATA (insert):', e3.message);
+          process.exit(1);
+        }
+      }
     }
     for (const v of verifyOps) {
       const { error: e4 } = await sb
