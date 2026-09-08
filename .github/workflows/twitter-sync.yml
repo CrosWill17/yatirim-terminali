@@ -49,7 +49,21 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_OWNER_USER_ID: ${{ secrets.SUPABASE_OWNER_USER_ID }}
           AUTO_VERIFY: '1'
-        run: npx -y tsx@4 scripts/twitter_sync/sync.ts
+        run: |
+          # Supabase/PostgREST kısa süreli 5xx/bağlantı hatalarında cron'u
+          # gereksiz yere kırmızıya boyama. Uygulama içindeki doğrulama ve
+          # idempotency sayesinde tekrar güvenlidir.
+          for attempt in 1 2 3; do
+            echo "Supabase senkronizasyonu: deneme ${attempt}/3"
+            if npx -y tsx@4 scripts/twitter_sync/sync.ts; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 15))
+            fi
+          done
+          echo "HATA: twitter sync 3 denemede de başarısız oldu."
+          exit 1
       - name: Temizlik
         if: always()
         run: rm -rf data/tweets.json data/images
