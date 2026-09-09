@@ -502,7 +502,7 @@ export default function Home() {
     const meta = assetMeta[pos.symbol];
     const q = market.positions?.[pos.symbol];
     const base: Position = { ...pos, asset_name: meta?.name ?? pos.asset_name, asset_type: meta?.type ?? pos.asset_type };
-    if (q && typeof q.price === 'number' && pos.quantity > 0) {
+    if (q && typeof q.price === 'number' && Number.isFinite(q.price) && pos.quantity > 0) {
       return { ...base, current_price: q.price, daily_change_pct: q.changePct };
     }
     return base;
