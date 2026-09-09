@@ -513,10 +513,13 @@ export default function Home() {
     if (q && typeof q.price === 'number' && Number.isFinite(q.price) && pos.quantity > 0) {
       return { ...base, current_price: q.price, daily_change_pct: q.changePct };
     }
+    // Market price yoksa unit_cost'a fallback yapma — price undefined göster (VERİ EKSİK)
+    // Bu, portföy hissesinin BIST kapalı/seed veri dışındaysa unit_cost gösterilmesini engeller.
+    if (!q) return { ...base, current_price: undefined, daily_change_pct: null };
     return base;
   });
 
-  const posValue = (p: Position) => p.quantity * (p.current_price || p.unit_cost);
+  const posValue = (p: Position) => p.quantity * (p.current_price ?? 0);
   const stockRows = livePositions.filter((p) => p.asset_type === 'BIST_HISSE').sort((a, b) => posValue(b) - posValue(a));
   const fundRows = livePositions.filter((p) => p.asset_type !== 'BIST_HISSE').sort((a, b) => posValue(b) - posValue(a));
   const closingRows = livePositions.filter((p) => /SAT|ÇIKIŞ|KAPANDI/.test(p.current_action)).sort((a, b) => posValue(b) - posValue(a));
