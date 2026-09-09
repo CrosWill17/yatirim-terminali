@@ -78,7 +78,6 @@ export function conflictTarget(cols: string[], hasUserId: boolean): string {
  * sarmalayıcıdan geçirmek TS2589 ("type instantiation is excessively deep")
  * veriyor. Çağrı yerlerinde zincir normal şekilde tiplenmeye devam eder.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function scopeToOwner(query: any, ownerId: string, hasUserId: boolean): any {
   return hasUserId ? query.eq('user_id', ownerId) : query;
 }

@@ -156,7 +156,7 @@ yatirim-terminali/
 │   └── twitter_sync/              # Actions: tweet + OCR
 ├── supabase/                      # 5 SQL dosyası (yukarıdaki sırayla)
 ├── .github/workflows/
-│   ├── ci.yml                     # typecheck + test + build + bundle denetimi + RLS
+│   ├── ci.yml                     # typecheck + lint + test + build + bundle denetimi + RLS
 │   ├── fund-holdings-sync.yml
 │   └── twitter-sync.yml
 └── docs/

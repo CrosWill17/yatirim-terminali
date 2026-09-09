@@ -39,6 +39,10 @@ jobs:
       - name: Tip kontrolü (strict)
         run: npm run typecheck
 
+      # ESLint — .eslintrc.json (next/core-web-vitals) ile etkileşimsiz çalışır.
+      - name: Lint
+        run: npm run lint
+
       # `next build` üretmeden koşulmaz: lib/seedIsolation.test.ts içindeki
       # "client bundle'ında seed portföy verisi YOK" testi .next/ yoksa
       # it.skipIf ile SESSİZCE atlanır. Sıra bu yüzden test → build → test.

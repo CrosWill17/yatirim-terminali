@@ -25,7 +25,7 @@ import {
   loadAll, upsertPosition, upsertDecision, insertTransaction,
   insertCashMovement, insertPrediction, updatePrediction,
   setInitialCapital, saveDailySnapshot, upsertFundHolding, upsertFundHoldingKapPdf, upsertFundHoldingAuto, deleteFundHolding,
-  approveProposal, rejectProposal, loadNavDaily, upsertNavDailyEstimate,
+  approveProposal, rejectProposal, loadNavDaily, upsertNavDailyEstimate, savePredictorTrustScore,
 } from '@/lib/repo';
 import type { FundHoldingProposal } from '@/lib/repo';
 import { computeFundPrediction, displayablePrediction, FundPrediction, HoldingPrice } from '@/lib/fundHoldings';
@@ -82,6 +82,8 @@ export default function Home() {
   const [holdingPrices, setHoldingPrices] = useState<Record<string, HoldingPrice | null>>({});
   const [tweetInput, setTweetInput] = useState('');
   const [parsing, setParsing] = useState(false);
+  /** Tweet çözümleme geri bildirimi — metin kaydedilmezse neden olduğunu gösterir. */
+  const [tweetMsg, setTweetMsg] = useState<{ tone: 'warn' | 'error' | 'ok'; text: string } | null>(null);
   const [trustScore, setTrustScore] = useState(78.5);
   const [market, setMarket] = useState<MarketData>(PUBLIC_SEED_MARKET);
 
@@ -386,6 +388,8 @@ export default function Home() {
         const m = meta[p.symbol];
         return m ? { ...p, asset_name: m.name, asset_type: m.type } : p;
       }));
+      // Predictor güven skoru: kayıtlı değer varsa varsayılan 78.5 yerine onu kullan.
+      if (bundle.predictorTrustScore != null) setTrustScore(bundle.predictorTrustScore);
       setDecisions(bundle.decisions);
       setTransactions(bundle.transactions);
       setCashMovements(bundle.cashMovements);
@@ -788,8 +792,11 @@ export default function Home() {
       const data = await res.json();
       if (data.success && data.parsed) {
         const p = data.parsed;
+        // id: UI + DB satırı için aynı gerçek UUID. Böylece updatePrediction
+        // `eq('id', ...)` dalına girip yalnızca bu satırı günceller; ayrıca
+        // Date.now tabanlı yinelenen id / raw_text+fund_code fallback riski kalkar.
         const newPred: SocialPrediction = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           predictor_handle: p.predictorHandle,
           fund_code: p.fundCode,
           predicted_return_pct: p.predictedReturnPct,
@@ -799,13 +806,19 @@ export default function Home() {
           status: p.predictedReturnPct == null ? 'VERI_EKSİK' : 'BEKLIYOR',
         };
         setPredictions((prev) => [newPred, ...prev]);
-        await track('Tahmin kaydı', insertPrediction(newPred));
+        const ok = await track('Tahmin kaydı', insertPrediction(newPred));
         setTweetInput('');
+        if (ok) setTweetMsg({ tone: 'ok', text: `Tahmin kaydedildi (${newPred.fund_code}).` });
       } else {
-        setTweetInput('');
+        // success:false — kod çözülemedi veya hata. Metin kutusunda kalır.
+        setTweetMsg({
+          tone: data?.code === 'no_fund_code' ? 'warn' : 'error',
+          text: data?.message || 'Tahmin ayrıştırılamadı.',
+        });
       }
     } catch {
       /* ağ hatası — metin kutusunda kalsın */
+      setTweetMsg({ tone: 'error', text: 'Ağ hatası — tahmin kaydedilemedi.' });
     } finally {
       setParsing(false);
     }
@@ -823,6 +836,8 @@ export default function Home() {
     setPredictions((prev) => prev.map((p) => (p.id === verifyId ? updated : p)));
     setTrustScore(newTrust);
     await track('Tahmin doğrulama', updatePrediction(updated));
+    // Güven skoru kalıcıdır — sayfa yenilenince 78.5'e dönmez.
+    await track('Güven skoru kaydı', savePredictorTrustScore(newTrust));
     setVerifyId(null);
     setVerifyPct('');
   };
@@ -1679,6 +1694,19 @@ export default function Home() {
                   <Send className="w-3.5 h-3.5" /> {parsing ? 'ÇÖZÜLÜYOR…' : 'ÇÖZÜMLE & KAYDET'}
                 </button>
               </div>
+              {tweetMsg && (
+                <div
+                  className={`text-[11px] px-2 py-1 rounded border ${
+                    tweetMsg.tone === 'ok'
+                      ? 'text-emerald-300 border-emerald-800 bg-emerald-950'
+                      : tweetMsg.tone === 'warn'
+                        ? 'text-amber-300 border-amber-800 bg-amber-950'
+                        : 'text-rose-300 border-rose-800 bg-rose-950'
+                  }`}
+                >
+                  {tweetMsg.text}
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">

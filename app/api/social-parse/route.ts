@@ -60,13 +60,23 @@ export async function POST(req: Request) {
 
     const parsed = parseSocialTweet(text);
 
+    // Fon kodu çözülemedi: uydurma 'BILINMEYEN' kodu DB'ye yazılmaz. İstemci
+    // bu yanıtı alınca kaydetmez, metni korur ve kullanıcıya mesaj gösterir.
+    if (!parsed.fundCode) {
+      return NextResponse.json({
+        success: false,
+        code: 'no_fund_code',
+        message: 'Metinde bilinen bir fon kodu bulunamadı; tahmin kaydedilmedi.',
+      });
+    }
+
     // Öncelik: isteğin gönderdiği handle → metindeki @handle → varsayılan.
     const predictorHandle = handle || parsed.predictorHandle || DEFAULT_HANDLE;
 
     return NextResponse.json({
       success: true,
       parsed: {
-        fundCode: parsed.fundCode ?? 'BILINMEYEN',
+        fundCode: parsed.fundCode,
         // null = sayı çözülemedi (VERİ EKSİK) — uydurma 0 yazılmaz
         predictedReturnPct: parsed.value,
         hasPercentSign: parsed.hasPercentSign,
