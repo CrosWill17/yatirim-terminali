@@ -83,6 +83,29 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
 
   const summaries = useMemo(() => summarizeHoldingRows(rows), [rows]);
 
+  // En yaygın 3 fonu belirle (toplam ağırlığa göre)
+  const topFundCodes = useMemo(() => {
+    const fundWeightMap = new Map<string, number>();
+    for (const r of rows) {
+      fundWeightMap.set(r.fund_code, (fundWeightMap.get(r.fund_code) ?? 0) + r.weight_pct);
+    }
+    return Array.from(fundWeightMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([code]) => code);
+  }, [rows]);
+
+  const topFundsDetail = useMemo(() => {
+    const detail: Record<string, {totalWeight: number, holdingsCount: number}> = {};
+    for (const code of topFundCodes) {
+      const fundHoldings = rows.filter((r) => r.fund_code === code);
+      const totalWeight = fundHoldings.reduce((sum, r) => sum + r.weight_pct, 0);
+      const holdingsCount = fundHoldings.length;
+      detail[code] = { totalWeight, holdingsCount };
+    }
+    return detail;
+  }, [rows, topFundCodes]);
+
   const byFund = useMemo(() => {
     const map = new Map<string, FundHoldingRow[]>();
     for (const r of rows) {

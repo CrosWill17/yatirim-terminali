@@ -5,6 +5,7 @@ import {
   TrendingUp, DollarSign, PieChart, ShieldAlert,
   AlertTriangle, ArrowUpRight, ArrowDownRight,
   RefreshCw, Activity, Download, Play, Send, PlusCircle,
+  CheckCircle, Trash2,
 } from 'lucide-react';
 import {
   ResponsiveContainer, PieChart as RPieChart, Pie, Cell, Tooltip as RTooltip,
@@ -98,6 +99,13 @@ export default function Home() {
   // P0 — yazma hataları ve son başarılı kayıt zamanı
   const [writeErrors, setWriteErrors] = useState<Record<string, string>>({});
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [txNotification, setTxNotification] = useState<{message: string, tone: 'ok' | 'warn' | 'error', show: boolean}>({message: '', tone: 'ok', show: false});
+  useEffect(() => {
+    if (txNotification.show) {
+      const timer = setTimeout(() => setTxNotification(prev => ({...prev, show: false})), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [txNotification.show]);
 
   // P2 — gizlilik maskesi (localStorage'da kalıcı, varsayılan KAPALI)
   const [masked, setMasked] = useState(false);
@@ -776,6 +784,13 @@ export default function Home() {
     if (updatedPos) await track('Pozisyon kaydı', upsertPosition(updatedPos));
     await track('İşlem kaydı', insertTransaction(txn));
     await track('Kasa kaydı', insertCashMovement(mov));
+
+    // İşlem başarılıysa kısa bilgi göster
+    setTxNotification({
+      message: `${symbol} işlemi ${txType === 'ALIS' ? 'alındı' : txType === 'SATIS' ? 'satıldı' : 'temettu'}(${fmtTl(Math.abs(cashDelta))})`,
+      tone: txType === 'ALIS' && cashDelta >= 0 ? 'error' : 'ok',
+      show: true,
+    });
   };
 
   const handleParseTweet = async () => {
@@ -1038,15 +1053,34 @@ export default function Home() {
     errorLines.length > 0 ? errorLines.join(' • ')
     : dbState === 'db_error' ? `Veritabanı okunamadı: ${dbError ?? 'bilinmeyen hata'}`
     : null;
+  const txNotificationUI = (
+    <div className={`px-4 py-2 rounded border ${
+      txNotification.tone === 'ok'
+        ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
+        : txNotification.tone === 'warn'
+          ? 'bg-amber-950 text-amber-300 border-amber-800'
+          : 'bg-rose-950 text-rose-300 border-border-rose-800'
+   }`} title={txNotification.message}>
+      <span className="flex items-center gap-2">
+        {txNotification.tone === 'ok' && <CheckCircle className="w-3.5 h-3.5" />}
+        {txNotification.tone === 'warn' && <AlertTriangle className="w-3.5 h-3.5" />}
+        {txNotification.tone === 'error' && <Trash2 className="w-3.5 h-3.5" />}
+        <span>{txNotification.message}</span>
+      </span>
+    </div>
+  );
 
   return (
     <div className="flex flex-col min-h-screen bg-[#0a0d14] text-slate-100">
 
       {/* 🔴 CANLI TICKER BAR */}
       <header className="border-b border-slate-800 bg-[#0d121f] px-4 py-2.5 flex items-center justify-between text-xs font-mono overflow-x-auto gap-6 sticky top-0 z-50">
+        <div className="flex items-center gap-2">
+          {txNotification.show && txNotificationUI}
+        </div>
         <div className="flex items-center gap-2 font-bold text-sky-400 shrink-0">
-          <Activity className={`w-4 h-4 ${market.source === 'live' ? 'animate-pulse text-emerald-400' : 'text-amber-400'}`} />
-          <span>YATIRIM TERMİNALİ v3.4</span>
+            <Activity className={`w-4 h-4 ${market.source === 'live' ? 'animate-pulse text-emerald-400' : 'text-amber-400'}`} />
+            <span>YATIRIM TERMİNALİ v3.4</span>
           <span className={`px-1.5 py-0.5 rounded border text-[10px] ${
             market.source === 'live'
               ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
