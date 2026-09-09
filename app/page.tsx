@@ -502,7 +502,7 @@ export default function Home() {
     const meta = assetMeta[pos.symbol];
     const q = market.positions?.[pos.symbol];
     const base: Position = { ...pos, asset_name: meta?.name ?? pos.asset_name, asset_type: meta?.type ?? pos.asset_type };
-    if (q && typeof q.price === 'number' && q.price > 0 && pos.quantity > 0) {
+    if (q && typeof q.price === 'number' && pos.quantity > 0) {
       return { ...base, current_price: q.price, daily_change_pct: q.changePct };
     }
     return base;
@@ -511,6 +511,7 @@ export default function Home() {
   const posValue = (p: Position) => p.quantity * (p.current_price || p.unit_cost);
   const stockRows = livePositions.filter((p) => p.asset_type === 'BIST_HISSE').sort((a, b) => posValue(b) - posValue(a));
   const fundRows = livePositions.filter((p) => p.asset_type !== 'BIST_HISSE').sort((a, b) => posValue(b) - posValue(a));
+  const closingRows = livePositions.filter((p) => /SAT|ÇIKIŞ|KAPANDI/.test(p.current_action)).sort((a, b) => posValue(b) - posValue(a));
   const stockTotal = stockRows.reduce((s, p) => s + posValue(p), 0);
   const fundTotal = fundRows.reduce((s, p) => s + posValue(p), 0);
   const stockPnl = stockRows.reduce((s, p) => s + posValue(p) - p.quantity * p.unit_cost, 0);
@@ -561,7 +562,7 @@ export default function Home() {
   const warnCount = alerts.filter((a) => a.level === 'WARN').length;
 
   const orderedPositions = useMemo(
-    () => [...stockRows, ...fundRows].filter((p) => p.quantity > 0),
+    () => [...stockRows, ...fundRows, ...closingRows].filter((p) => p.quantity > 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [livePositions]
   );
@@ -733,19 +734,20 @@ export default function Home() {
         const newQty = Number((pos.quantity + q).toFixed(4));
         const newUnitCost = Number((((oldCost + total) / newQty) * 10000).toFixed(0)) / 10000;
         nextPositions = positions.map((p) => (p.symbol === symbol ? { ...p, quantity: newQty, unit_cost: newUnitCost, current_action: 'TUT' } : p));
-      } else {
-        // Kullanıcı seçimi + kanonik meta: meta varsa onu kullan, yoksa seçilen tür
-        const chosenType = (assetMeta[symbol]?.type ?? txAssetType) as Position['asset_type'];
-        nextPositions = [
-          ...positions,
-          {
-            id: Date.now().toString(), symbol, asset_name: assetMeta[symbol]?.name ?? symbol,
-            asset_type: chosenType,
-            quantity: q, unit_cost: price, current_price: market.positions?.[symbol]?.price ?? price,
-            risk_score: 5, current_action: 'TUT', rationale: 'Terminal üzerinden açılan pozisyon.', is_active: true,
-          },
-        ];
-      }
+} else {
+          // Kullanıcı seçimi + kanonik meta: meta varsa onu kullan, yoksa seçilen tür
+          const isPpf = isPpfCode(symbol);
+          const chosenType = isPpf ? 'PPF' : (assetMeta[symbol]?.type ?? txAssetType) as Position['asset_type'];
+          nextPositions = [
+            ...positions,
+            {
+              id: Date.now().toString(), symbol, asset_name: assetMeta[symbol]?.name ?? symbol,
+              asset_type: chosenType,
+              quantity: q, unit_cost: price, current_price: market.positions?.[symbol]?.price ?? price,
+              risk_score: 5, current_action: 'TUT', rationale: 'Terminal üzerinden açılan pozisyon.', is_active: true,
+            },
+          ];
+        }
       msg = `${symbol} ALIŞ ${fmtQty(q)} × ${fmtPub(price, 4)} TL`;
     } else {
       cashDelta = total;

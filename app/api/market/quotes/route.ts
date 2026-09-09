@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getMixedQuotes } from '@/lib/marketData';
 import { getUserFromRequest } from '@/lib/supabaseServer';
 import { createRateLimiter, clientKey, retryAfterSeconds } from '@/lib/rateLimit';
+import { apiSuccess, apiError } from '@/lib/api';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,7 +21,7 @@ export const dynamic = 'force-dynamic';
  * (curl ile doğrulandı: token'sız istek HTTP 200 dönüyordu) site herkese açık
  * bir scrape proxy'sine dönüşüyor ve Yahoo/fonaly sunucu IP'mizi banlayabiliyor.
  * Çağıran iki yer de (app/page.tsx:216 ve :389) zaten `isGuest` kontrolüyle
- * korunuyor, yani misafir akışı bu uca hiç dokunmuyor — misafir ekranı
+ * korunuyor, yani misafir ekranı bu uca hiç dokunmuyor — misafir ekranı
  * kimlik gerektirmeyen /api/market/public'i kullanır.
  */
 
@@ -32,14 +33,19 @@ const LIMIT = 30;
 export async function GET(req: Request) {
   const user = await getUserFromRequest(req);
   if (!user) {
-    return NextResponse.json({ error: 'Oturum gerekli' }, { status: 401 });
+    return NextResponse.json(
+      apiError('Oturum gerekli'),
+      { status: 401 }
+    );
   }
 
   const rl = limiter.check(clientKey(req, user.id), { windowMs: WINDOW_MS, limit: LIMIT });
   if (!rl.ok) {
     return NextResponse.json(
-      { error: 'Çok fazla istek — biraz sonra tekrar deneyin' },
-      { status: 429, headers: { 'Retry-After': String(retryAfterSeconds(rl.resetAt)) } }
+      apiError('Çok fazla istek — biraz sonra tekrar deneyin', {
+        status: 429,
+        headers: { 'Retry-After': String(retryAfterSeconds(rl.resetAt)) },
+      })
     );
   }
 
@@ -48,11 +54,14 @@ export async function GET(req: Request) {
     const raw = url.searchParams.get('symbols') ?? '';
     const codes = raw.split(',').map((s) => s.trim()).filter(Boolean);
     if (codes.length === 0) {
-      return NextResponse.json({ quotes: {} });
+      return NextResponse.json(apiSuccess({ quotes: {} }));
     }
     const quotes = await getMixedQuotes(codes);
-    return NextResponse.json({ quotes, requested: codes.length, at: new Date().toISOString() });
+    return NextResponse.json(apiSuccess({ quotes, requested: codes.length, at: new Date().toISOString() }));
   } catch {
-    return NextResponse.json({ error: 'Fiyatlar çekilemedi' }, { status: 500 });
+    return NextResponse.json(
+      apiError('Fiyatlar çekilemedi'),
+      { status: 500 }
+    );
   }
 }

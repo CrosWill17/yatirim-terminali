@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getPublicMarketData } from '@/lib/marketData';
+import { apiSuccess, apiError } from '@/lib/api';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,8 +14,11 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   try {
     const data = await getPublicMarketData();
-    return NextResponse.json(data);
+    return NextResponse.json(apiSuccess(data));
   } catch {
-    return NextResponse.json({ error: 'Halka açık piyasa verisi çekilemedi' }, { status: 500 });
+    return NextResponse.json(
+      apiError('Halka açık piyasa verisi çekilemedi'),
+      { status: 500 }
+    );
   }
 }

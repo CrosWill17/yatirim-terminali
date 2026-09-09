@@ -3,6 +3,7 @@ import { getUserFromRequest } from '@/lib/supabaseServer';
 import {
   SEED_POSITIONS, SEED_DECISIONS, SEED_INITIAL_CAPITAL, SEED_CASH_BALANCE,
 } from '@/lib/serverSeed';
+import { apiSuccess, apiError } from '@/lib/api';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,16 +23,15 @@ export async function GET(req: Request) {
   const user = await getUserFromRequest(req);
   if (!user) {
     return NextResponse.json(
-      { error: 'Oturum gerekli — yerleşik portföy yalnızca giriş yapmış kullanıcıya verilir.' },
+      apiError('Oturum gerekli — yerleşik portföy yalnızca giriş yapmış kullanıcıya verilir.'),
       { status: 401 }
     );
   }
 
-  return NextResponse.json({
-    ok: true,
+  return NextResponse.json(apiSuccess({
     positions: SEED_POSITIONS,
     decisions: SEED_DECISIONS,
     initialCapital: SEED_INITIAL_CAPITAL,
     cashBalance: SEED_CASH_BALANCE,
-  });
+  }));
 }
