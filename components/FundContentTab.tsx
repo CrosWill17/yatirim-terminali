@@ -604,8 +604,8 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
           <FileText className="w-4 h-4" /> KAP PDF YÜKLE — AYLIK PORTFÖY DAĞILIM RAPORU (TLY)
         </h3>
         <p className="text-[10px] text-slate-400">
-          KAP'tan indirdiğin TLY_2026.xx.pdf gibi aylık raporu yükle. Sistem hisse kodlarını ve GRUP (%) ağırlıklarını otomatik çıkarır,
-          aynı ticker birden fazla lot ise toplar, %0,01 altı atar. Önizleme sonrası onayla → fund_holdings tablosuna source='kap-pdf' + manual override olarak yazar (sync ezmez).
+          KAP&apos;tan indirdiğin TLY_2026.xx.pdf gibi aylık raporu yükle. Sistem hisse kodlarını ve GRUP (%) ağırlıklarını otomatik çıkarır,
+          aynı ticker birden fazla lot ise toplar, %0,01 altı atar. Önizleme sonrası onayla → fund_holdings tablosuna source=&apos;kap-pdf&apos; + manual override olarak yazar (sync ezmez).
         </p>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           <input value={pdfFundCode} onChange={(e) => setPdfFundCode(e.target.value.toUpperCase())} placeholder="FON KODU (TLY)" className="bg-slate-900 border border-slate-700 rounded px-3 py-2 uppercase focus:outline-none focus:border-sky-500" />
@@ -647,7 +647,7 @@ export default function FundContentTab({ rows, prices, predictions = [], proposa
                 </tbody>
               </table>
             </div>
-            <p className="text-[10px] text-slate-500">Kaydedince her satır source='manual' (kap-pdf notu ile) olur, otomatik sync ezmez. Önceki TLY kayıtları aynı ticker için güncellenir, raporda olmayan auto satırlar daha sonra fund-holdings-sync tarafından temizlenebilir (manuel korunur).</p>
+            <p className="text-[10px] text-slate-500">Kaydedince her satır source=&apos;manual&apos; (kap-pdf notu ile) olur, otomatik sync ezmez. Önceki TLY kayıtları aynı ticker için güncellenir, raporda olmayan auto satırlar daha sonra fund-holdings-sync tarafından temizlenebilir (manuel korunur).</p>
           </div>
         )}
       </div>

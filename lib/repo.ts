@@ -115,6 +115,8 @@ export interface DbBundle {
   proposals: FundHoldingProposal[];
   cashBalance: number | null;
   initialCapital: number | null;
+  /** Predictor güven skoru (app_settings → 'predictor_trust_score'). null = henüz kayıtlı değil. */
+  predictorTrustScore: number | null;
 }
 
 export type LoadResult =
@@ -128,7 +130,7 @@ export type LoadResult =
 export async function loadAll(): Promise<LoadResult> {
   if (!enabled()) return { ok: false, error: setupError('loadAll') };
   try {
-    const [posRes, decRes, txnRes, cashRes, predRes, fundRes, propRes, balRes, setRes] = await Promise.all([
+    const [posRes, decRes, txnRes, cashRes, predRes, fundRes, propRes, balRes, setRes, trustRes] = await Promise.all([
       supabase.from('portfolio_positions').select('*').order('symbol'),
       supabase.from('execution_decisions').select('*').order('created_at'),
       supabase.from('transactions').select('*').order('created_at', { ascending: false }),
@@ -138,6 +140,7 @@ export async function loadAll(): Promise<LoadResult> {
       supabase.from('fund_holding_proposals').select('*').eq('status', 'pending').order('detected_at', { ascending: false }),
       supabase.from('cash_ledger').select('balance_after').order('created_at', { ascending: false }).limit(1),
       supabase.from('app_settings').select('key, value').eq('key', 'initial_capital'),
+      supabase.from('app_settings').select('key, value').eq('key', 'predictor_trust_score'),
     ]);
 
     // ÇEKİRDEK tablolar: hata varsa yükleme BAŞARISIZ sayılır (sessiz devam yok).
@@ -262,10 +265,12 @@ export async function loadAll(): Promise<LoadResult> {
 
     const cashBalance = balRes.data?.[0] != null ? Number((balRes.data as any[])[0].balance_after) : null;
     const initialCapital = setRes.data?.[0] != null ? Number((setRes.data as any[])[0].value) : null;
+    // Predictor güven skoru: uydurma varsayılan yerine, varsa kayıtlı değer kullanılır.
+    const predictorTrustScore = trustRes.data?.[0] != null ? Number((trustRes.data as any[])[0].value) : null;
 
     return {
       ok: true,
-      bundle: { positions, decisions, transactions, cashMovements, predictions, fundHoldings, proposals, cashBalance, initialCapital },
+      bundle: { positions, decisions, transactions, cashMovements, predictions, fundHoldings, proposals, cashBalance, initialCapital, predictorTrustScore },
     };
   } catch (err) {
     const error = classifySupabaseError('loadAll', {
@@ -351,6 +356,11 @@ export function insertCashMovement(m: CashMovement): Promise<WriteResult> {
 export function insertPrediction(p: SocialPrediction): Promise<WriteResult> {
   return write('insertPrediction', () =>
     supabase.from('social_predictions').insert({
+      // id UI tarafında gerçek UUID olarak üretilir ve buraya yazılır; böylece
+      // yerel prediction.id === DB satır id'si olur ve sonraki updatePrediction
+      // uuid dalına girip yalnızca O satırı günceller (raw_text+fund_code
+      // fallback'i çoklu satırı yanlışlıkla güncelleyemez).
+      id: p.id,
       predictor_handle: p.predictor_handle,
       fund_code: p.fund_code,
       predicted_return_pct: p.predicted_return_pct,
@@ -384,6 +394,20 @@ export function setInitialCapital(value: number): Promise<WriteResult> {
     supabase.from('app_settings').upsert(
       { key: 'initial_capital', value: String(value) },
       // app_settings'in PK'si artık bileşik: (user_id, key)
+      { onConflict: 'user_id,key' }
+    )
+  );
+}
+
+/**
+ * Predictor güven skorunu kalıcı tutar (kullanıcı başına).
+ * UI handleVerifyPrediction her başarılı doğrulamada güncel değeri yazar;
+ * sayfa yenilendiğinde varsayılan 78.5 yerine kayıtlı değer yüklenir.
+ */
+export function savePredictorTrustScore(value: number): Promise<WriteResult> {
+  return write('savePredictorTrustScore', () =>
+    supabase.from('app_settings').upsert(
+      { key: 'predictor_trust_score', value: String(value) },
       { onConflict: 'user_id,key' }
     )
   );
